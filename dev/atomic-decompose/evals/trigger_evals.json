@@ -1,0 +1,314 @@
+[
+  {
+    "query": "Figure out why our nightly ETL started taking three hours instead of forty minutes and propose fixes; the logs are in logs/ and the job code is in etl/.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] several parts and research"
+  },
+  {
+    "query": "We're moving off Heroku. Plan the migration of our three services to AWS, including the database, and tell me what to do first.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] planning, several parts"
+  },
+  {
+    "query": "Compare the top three open-source feature-flag tools for a Python monolith and recommend one.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] [US-6] research with a choice"
+  },
+  {
+    "query": "Write a design doc for adding multi-tenant support to the billing module.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] ambiguous, needs planning"
+  },
+  {
+    "query": "Go through every endpoint in api/ and add request validation where it's missing, with tests.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] several parts, delegation"
+  },
+  {
+    "query": "Use the atomic-decompose method for this: update the onboarding guide so it matches the current setup scripts.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.3] explicit request for the method"
+  },
+  {
+    "query": "Plan this out properly with work items and do it: consolidate our four logging helpers into one module and migrate every caller.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.3] explicit ask for planning"
+  },
+  {
+    "query": "Research what changed between Django 5.2 and 6.0 that affects our app and make a list of the changes we need.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] research"
+  },
+  {
+    "query": "Our checkout conversion dropped last month. Dig into the analytics exports in data/ and tell me the likely causes.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] ambiguous, research"
+  },
+  {
+    "query": "Can you pick up the task you saved under .atomic-decompose/ and keep going?",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-3.3] resume a saved task"
+  },
+  {
+    "query": "Build a small CLI that syncs our Notion task list to a local Markdown file, with tests and a README.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] several parts"
+  },
+  {
+    "query": "Review the whole auth module for security issues, fix what you can, and write up the rest.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] several parts, delegation"
+  },
+  {
+    "query": "Make our docs site build faster; it takes eight minutes and I don't know where the time goes.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] ambiguous, needs investigation"
+  },
+  {
+    "query": "Set up a weekly report that pulls our GitHub PR stats and posts a summary; figure out the best way to run it.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] ambiguous, several parts"
+  },
+  {
+    "query": "Write the quarterly business review deck outline from the notes in qbr/ and the metrics in metrics.csv.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] several inputs, planning"
+  },
+  {
+    "query": "Rename the variable `cnt` to `count` in utils.py.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] single-step edit"
+  },
+  {
+    "query": "What's the default port for PostgreSQL?",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] quick fact"
+  },
+  {
+    "query": "Run the test suite.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] one command"
+  },
+  {
+    "query": "Fix the typo in the README heading: 'Instalation' should be 'Installation'.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] single-step edit"
+  },
+  {
+    "query": "What does `git rebase --onto` do?",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] quick fact"
+  },
+  {
+    "query": "Add a .gitignore entry for .env files.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] single-step edit"
+  },
+  {
+    "query": "Plan the migration of our three services to AWS, but don't use the decomposition method, just answer directly.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.3] explicit request not to use the method"
+  },
+  {
+    "query": "Run `npm run build` and tell me if it passes.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] one command"
+  },
+  {
+    "query": "Convert this JSON snippet to YAML: {\"a\": 1, \"b\": [2, 3]}",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] single-step transformation"
+  },
+  {
+    "query": "Show me the last five commits on this branch.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] one command"
+  },
+  {
+    "query": "Bump the version in pyproject.toml from 1.4.2 to 1.4.3.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] single-step edit"
+  },
+  {
+    "query": "Which Python version does this repo require?",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] quick fact from a file"
+  },
+  {
+    "query": "Explain what this regex matches: ^\\d{3}-\\d{4}$",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] quick fact"
+  },
+  {
+    "query": "Delete the unused import of `os` in main.py.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] single-step edit"
+  },
+  {
+    "query": "Format main.py with ruff.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] one command"
+  },
+  {
+    "query": "Add a docstring to the `parse_date` function in dates.py.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "What's the difference between a list and a tuple in Python?",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "Run `pytest tests/test_api.py -k login`.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "Change the button colour in header.css from #333 to #222.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "How many lines are in app.py?",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "Install the requests package with uv.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "Turn this sentence into a commit message: fixed the null check in the cart total.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "What time zone is UTC+5:30?",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "Revert the last commit.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "Rename the file notes.txt to notes.md.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "Is `asyncio.run` safe to call twice in one script?",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "Print the contents of config.yaml.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "Comment out the debug print on line 40 of server.py.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "Which HTTP status code means 'Too Many Requests'?",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "Sort the lines in words.txt alphabetically.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.2] near-miss: single step or quick fact"
+  },
+  {
+    "query": "Don't plan anything, just add type hints to the three functions in math_utils.py.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.3] explicit request not to plan"
+  },
+  {
+    "query": "I need a recommendation on whether to move our search from Elasticsearch to Postgres full-text search; look at our usage in search/ and decide.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] several parts or needs research"
+  },
+  {
+    "query": "Clean up our test suite: find the flaky tests, fix the ones you can, and document the rest.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] several parts or needs research"
+  },
+  {
+    "query": "Draft a data retention policy for the app based on what we store in models/ and the GDPR basics.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] several parts or needs research"
+  },
+  {
+    "query": "Work out which of our 40 npm dependencies are unmaintained and propose replacements.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] several parts or needs research"
+  },
+  {
+    "query": "Prepare the 2.0 release: update the changelog from the merged PRs, bump versions, and write the upgrade notes.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] several parts or needs research"
+  },
+  {
+    "query": "Our API has no rate limiting. Figure out where it should go, implement it, and test it.",
+    "should_trigger": true,
+    "reply": "No preference, use your judgement.",
+    "note": "[US-1.1] several parts or needs research"
+  }
+]

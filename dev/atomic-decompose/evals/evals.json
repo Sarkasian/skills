@@ -1,0 +1,373 @@
+{
+  "skill_name": "atomic-decompose",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Our invoice service in this folder needs a background job queue for the invoice emails and the nightly reconciliation. Pick the one we should adopt and tell me why.",
+      "expected_output": "A recommendation of one queue that adds no paid managed service (for example a Postgres-backed queue), compared against at least two alternatives on low operating effort, then cost.",
+      "files": [
+        "evals/files/queue-choice/"
+      ],
+      "expectations": [
+        "[US-7.1] The final result's first sentence names the one queue it recommends.",
+        "[US-6.1] [US-6.3] The result names at least two alternatives it considered and, for each, why it lost against the settled criteria.",
+        "[US-3.1] The recommended queue adds no paid managed service, consistent with the budget answer.",
+        "[US-6] The task's state.json holds a decision with at least one rejected option and its reason.",
+        "[US-3.3] In the new session, the agent resumes the saved task and asks no question that the question round already settled.",
+        "[US-11.1] After the accept follow-up, the task's record.jsonl has a marked event with mark accepted.",
+        "[US-9] The run record never has more batches running at once than the lower of the task's state.json max_parallel and the harness cap (1 on zoo_code_local and in the Cursor main-session run)."
+      ],
+      "covers": [
+        "choice"
+      ],
+      "planted_questions": [
+        {
+          "fact": "the criteria to choose the queue by",
+          "type": "scope"
+        },
+        {
+          "fact": "the monthly budget for new managed infrastructure",
+          "type": "user_only"
+        }
+      ],
+      "discoverable_facts": [
+        "the service already uses Postgres 16",
+        "the service runs Python 3.12",
+        "about 2,000 emails a day plus one nightly job"
+      ],
+      "scripted_answers": [
+        {
+          "fact": "the criteria to choose the queue by",
+          "answer": "Lowest operating effort for a two-person team first, then cost."
+        },
+        {
+          "fact": "the monthly budget for new managed infrastructure",
+          "answer": "Nothing extra: we will not pay for a new managed service."
+        }
+      ],
+      "fallback_reply": "No preference, use your judgement.",
+      "follow_ups": [
+        {
+          "after": "new_session",
+          "text": "Please continue the task you started in this workspace."
+        },
+        {
+          "after": "result",
+          "text": "accept"
+        }
+      ],
+      "weak_result": null
+    },
+    {
+      "id": 2,
+      "prompt": "Using only the documents in this folder, write a short customer brief, brief.md, saying which product versions are supported and until when, with a source for every date. Only use sources dated 2026 or later.",
+      "expected_output": "brief.md listing 5.x current until 2028-03-31, 4.x security fixes only until 2027-06-30 and 3.x end of life since 2026-03-31, citing SUPPORT.md, with the support contact.",
+      "files": [
+        "evals/files/support-matrix/"
+      ],
+      "expectations": [
+        "[FR-7] [FR-4] brief.md does not say that 3.x is supported until 2027.",
+        "[US-7.1] The first sentence of brief.md says which versions are supported.",
+        "[US-3.1] brief.md gives support@example.com as the contact and lists 3.x as unsupported.",
+        "[US-11.2] After the rework follow-up, record.jsonl has a marked event with mark reworked and the user's reason.",
+        "[US-11.3] The reworked brief.md adds a one-line upgrade recommendation for 3.x customers, comes from the same task folder, and no settled question is asked again.",
+        "[US-9] The run record never has more batches running at once than the lower of the task's state.json max_parallel and the harness cap (1 on zoo_code_local and in the Cursor main-session run)."
+      ],
+      "covers": [
+        "weak_result"
+      ],
+      "planted_questions": [
+        {
+          "fact": "the support contact to put in the brief",
+          "type": "user_only"
+        },
+        {
+          "fact": "whether to list end-of-life versions",
+          "type": "scope"
+        }
+      ],
+      "discoverable_facts": [
+        "the support policy was last updated 2026-10-01",
+        "4.x receives security fixes only"
+      ],
+      "scripted_answers": [
+        {
+          "fact": "the support contact to put in the brief",
+          "answer": "support@example.com"
+        },
+        {
+          "fact": "whether to list end-of-life versions",
+          "answer": "Yes, list them as unsupported."
+        }
+      ],
+      "fallback_reply": "No preference, use your judgement.",
+      "follow_ups": [
+        {
+          "after": "result",
+          "text": "rework: add a one-line upgrade recommendation for 3.x customers"
+        }
+      ],
+      "weak_result": "evals/files/support-matrix/notes/blog-2024.md"
+    },
+    {
+      "id": 3,
+      "prompt": "Audit every module in app/ for missing input validation. Write one findings file per module under audit/, named after the module, and a summary.md that ranks the modules by risk.",
+      "expected_output": "audit/ with 12 findings files and summary.md addressed to Payments Platform, ranking orders and refunds (SQL built from request input) and exports (shell command from request input) highest, reporting medium and above only.",
+      "files": [
+        "evals/files/audit-app/"
+      ],
+      "expectations": [
+        "[US-4.1] audit/ holds one findings file for each of the 12 modules and a summary.md.",
+        "[US-3.1] [NFR-5] No findings file reports a low-severity finding.",
+        "[US-3.1] summary.md is addressed to Payments Platform.",
+        "[US-7.1] The first sentence of summary.md names the highest-risk modules.",
+        "summary.md ranks orders, refunds and exports above every other module.",
+        "[US-5.1] The plan shown before work starts names the governing question, the work items with their status, and the settled answers.",
+        "[US-5.3] The plan shown after the result reflects every item state.json records as added or dropped.",
+        "[US-5.2] [FR-9] No two work items in the shown plan name the same deliverable.",
+        "[US-9] The run record never has more batches running at once than the lower of the task's state.json max_parallel and the harness cap (1 on zoo_code_local and in the Cursor main-session run)."
+      ],
+      "covers": [
+        "long_run",
+        "compaction"
+      ],
+      "planted_questions": [
+        {
+          "fact": "the severity threshold to report",
+          "type": "scope"
+        },
+        {
+          "fact": "the team the summary is addressed to",
+          "type": "user_only"
+        }
+      ],
+      "discoverable_facts": [
+        "there are 12 modules in app/",
+        "the app uses Flask"
+      ],
+      "scripted_answers": [
+        {
+          "fact": "the severity threshold to report",
+          "answer": "Medium and above only."
+        },
+        {
+          "fact": "the team the summary is addressed to",
+          "answer": "Payments Platform"
+        }
+      ],
+      "fallback_reply": "No preference, use your judgement.",
+      "follow_ups": [
+        {
+          "after": "round",
+          "text": "Before you start, show me the plan."
+        },
+        {
+          "after": "result",
+          "text": "Show me the plan again, with each item's status."
+        }
+      ],
+      "weak_result": null
+    },
+    {
+      "id": 4,
+      "prompt": "Rename calc_total to compute_total everywhere in this package, including the tests and the README, and make sure the tests still pass.",
+      "expected_output": "Every calc_total reference renamed to compute_total; python3 -m unittest passes.",
+      "files": [
+        "evals/files/rename-pkg/"
+      ],
+      "expectations": [
+        "[US-2.5] The agent starts work without a question round.",
+        "No file in the workspace still contains calc_total.",
+        "python3 -m unittest exits 0 in the workspace.",
+        "[US-8.3] The task completes with no skill named for any work item.",
+        "[US-9] The run record never has more batches running at once than the lower of the task's state.json max_parallel and the harness cap (1 on zoo_code_local and in the Cursor main-session run)."
+      ],
+      "covers": [],
+      "planted_questions": [],
+      "discoverable_facts": [],
+      "scripted_answers": [],
+      "fallback_reply": "No preference, use your judgement.",
+      "follow_ups": [],
+      "weak_result": null
+    },
+    {
+      "id": 5,
+      "prompt": "Write a quarterly sales summary, summary.md, from data/sales.csv for the leadership update.",
+      "expected_output": "summary.md for Q3 2026 (latest full quarter) in EUR, total 952,511; after the change, Q2 2026, total 909,892, naming the affected items.",
+      "files": [
+        "evals/files/report-defaults/"
+      ],
+      "expectations": [
+        "[US-2.2] Each question in the question round is labelled as a scope question or a user-only question.",
+        "[US-2.3] Each question in the question round carries a proposed default.",
+        "[US-2.6] state.json records every question-round answer with source default_accepted.",
+        "[US-3.4] The reworked summary.md reports Q2 2026, with total revenue 909,892 EUR.",
+        "[US-3.5] The result after the change names the work items the change affected.",
+        "[US-9] The run record never has more batches running at once than the lower of the task's state.json max_parallel and the harness cap (1 on zoo_code_local and in the Cursor main-session run)."
+      ],
+      "covers": [],
+      "planted_questions": [
+        {
+          "fact": "which quarter to cover",
+          "type": "scope"
+        },
+        {
+          "fact": "the currency to report in",
+          "type": "scope"
+        },
+        {
+          "fact": "the name to sign the summary with",
+          "type": "user_only"
+        }
+      ],
+      "discoverable_facts": [
+        "the data covers January to September 2026",
+        "revenue is in EUR"
+      ],
+      "scripted_answers": [
+        {
+          "fact": "which quarter to cover",
+          "answer": "Use your default."
+        },
+        {
+          "fact": "the currency to report in",
+          "answer": "Use your default."
+        },
+        {
+          "fact": "the name to sign the summary with",
+          "answer": "Use your default."
+        }
+      ],
+      "fallback_reply": "No preference, use your judgement.",
+      "follow_ups": [
+        {
+          "after": "result",
+          "text": "Change of plan: cover Q2 2026 instead of the quarter you used."
+        }
+      ],
+      "weak_result": null
+    },
+    {
+      "id": 6,
+      "prompt": "Consolidate the configuration in config/ into one file per environment (dev, staging, prod), remove what is obsolete, and write owners.md listing which team owns each setting, from owners.csv.",
+      "expected_output": "config/ with app.dev.yaml, app.staging.yaml (with the overrides merged) and app.prod.yaml; obsolete files removed only after approval; owners.md giving smtp_relay to Messaging and fx_rates_url to Treasury.",
+      "files": [
+        "evals/files/cleanup-config/"
+      ],
+      "expectations": [
+        "[US-4.5] The agent asks before deleting any file, and no file is deleted before that question is answered.",
+        "[US-4.6] When it stops for approval, it names the stop condition and what it needs to continue.",
+        "[US-4.2] [US-4.3] If the two owner questions are asked after work starts, they are asked in the same message, after the work they do not block.",
+        "[US-3.1] owners.md gives smtp_relay to Messaging and fx_rates_url to Treasury.",
+        "config/ ends with exactly one file per environment: app.dev.yaml, app.staging.yaml and app.prod.yaml.",
+        "[US-9] The run record never has more batches running at once than the lower of the task's state.json max_parallel and the harness cap (1 on zoo_code_local and in the Cursor main-session run)."
+      ],
+      "covers": [],
+      "planted_questions": [
+        {
+          "fact": "the team that owns smtp_relay",
+          "type": "user_only"
+        },
+        {
+          "fact": "the team that owns fx_rates_url",
+          "type": "user_only"
+        }
+      ],
+      "discoverable_facts": [
+        "db_url is owned by Data Platform",
+        "log_level is owned by SRE",
+        "app.prod.old.yaml was replaced in 2025"
+      ],
+      "scripted_answers": [
+        {
+          "fact": "the team that owns smtp_relay",
+          "answer": "Messaging"
+        },
+        {
+          "fact": "the team that owns fx_rates_url",
+          "answer": "Treasury"
+        }
+      ],
+      "fallback_reply": "Yes, go ahead.",
+      "follow_ups": [],
+      "weak_result": null
+    },
+    {
+      "id": 7,
+      "prompt": "Profile the two CSV files in data/ and tell me which data-quality problems to fix first.",
+      "expected_output": "Problems ranked: duplicate order_id 1039 in orders.csv, then 10% null email in customers.csv; names csv-profile as used for the profiling items.",
+      "files": [
+        "evals/files/csv-profile/",
+        "evals/files/fixture-skills/csv-profile/SKILL.fixture.md"
+      ],
+      "expectations": [
+        "[US-8.1] Each work item that profiles a CSV file has the csv-profile SKILL.md path as its skill in state.json.",
+        "[US-8.2] The result names the csv-profile skill and the work items it was used for.",
+        "[US-7.1] The first sentence names the duplicate order_id 1039 in orders.csv as the first problem to fix.",
+        "The result names the 10% null email column in customers.csv as a problem.",
+        "[US-9] The run record never has more batches running at once than the lower of the task's state.json max_parallel and the harness cap (1 on zoo_code_local and in the Cursor main-session run)."
+      ],
+      "covers": [
+        "skill_route"
+      ],
+      "planted_questions": [
+        {
+          "fact": "what counts as a problem worth fixing",
+          "type": "scope"
+        }
+      ],
+      "discoverable_facts": [
+        "customers.csv has 50 rows",
+        "orders.csv has 80 rows"
+      ],
+      "scripted_answers": [
+        {
+          "fact": "what counts as a problem worth fixing",
+          "answer": "Any duplicate id, or any column over 1% null."
+        }
+      ],
+      "fallback_reply": "No preference, use your judgement.",
+      "follow_ups": [],
+      "weak_result": null
+    },
+    {
+      "id": 8,
+      "prompt": "Look through notes/ and plan out the migration of our docs site to the new theme.",
+      "expected_output": "After the follow-up, a quick bullet list with no further work items run.",
+      "files": [
+        "evals/files/wrong-engagement/"
+      ],
+      "expectations": [
+        "[US-1.4] No work item starts after the follow-up.",
+        "[US-1.5] [FR-12] record.jsonl has a wrong_engagement event and state.json status is handed_back.",
+        "The reply after the follow-up is a bullet list.",
+        "[US-9] The run record never has more batches running at once than the lower of the task's state.json max_parallel and the harness cap (1 on zoo_code_local and in the Cursor main-session run)."
+      ],
+      "covers": [],
+      "planted_questions": [
+        {
+          "fact": "the target date for the migration",
+          "type": "user_only"
+        }
+      ],
+      "discoverable_facts": [
+        "about 140 pages",
+        "the new theme is Starlight 0.30"
+      ],
+      "scripted_answers": [
+        {
+          "fact": "the target date for the migration",
+          "answer": "End of January 2027."
+        }
+      ],
+      "fallback_reply": "No preference, use your judgement.",
+      "follow_ups": [
+        {
+          "after": "round",
+          "text": "Actually, you should not use the planning method for this. Just give me a quick bullet list."
+        }
+      ],
+      "weak_result": null
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+db_url: postgres://localhost/app
+log_level: debug
+smtp_relay: localhost:1025
+fx_rates_url: https://fx.dev.example.com

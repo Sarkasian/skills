@@ -1,0 +1,3 @@
+# replaced by app.prod.yaml in 2025
+db_url: postgres://db-old.prod/app
+log_level: warn

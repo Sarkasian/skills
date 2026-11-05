@@ -1,0 +1,4 @@
+db_url: postgres://db.prod/app
+log_level: info
+smtp_relay: relay.example.com:587
+fx_rates_url: https://fx.example.com
