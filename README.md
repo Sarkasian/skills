@@ -22,9 +22,9 @@ gh skill install <owner>/<repo> atomic-decompose --scope user
 
 By hand: copy `skills/atomic-decompose/` to `~/.agents/skills/` (read by Cursor, Codex and Zoo Code) and symlink `~/.claude/skills/atomic-decompose` to it (Claude Code). Install it in one location only, or a host that reads several folders may load it twice.
 
-Pin a release with `#<tag>` (`npx skills`) or `@<tag>` (`gh skill`). The skill runs a local Python script and applies diffs to your workspace, so read it before installing (`gh skill preview`).
+Pin a release with `#<tag>` (`npx skills`) or `@<tag>` (`gh skill`). The skill runs a local Python script that edits your workspace files through git checkpoints and worktrees, so read it before installing (`gh skill preview`).
 
-Requirements: `python3`, plus `git` when a work item changes workspace files. The skill writes task state to `<workspace>/.atomic-decompose/`; add that to your project's `.gitignore`.
+Requirements: `python3`, plus `git` and a workspace inside a git repository when a work item changes workspace files. The skill writes task state to `<workspace>/.atomic-decompose/<task-id>/`, which holds its own `.gitignore`, so it never shows in `git status`; checkpoints live under `refs/atomic-decompose/` until you accept the result.
 
 ## Develop
 

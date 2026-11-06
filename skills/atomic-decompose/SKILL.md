@@ -14,11 +14,11 @@ In this file, `ad` means `python3 <dir>/scripts/decompose.py`, where `<dir>` is 
 ## Entry: run this first, every time
 
 - **New task** (no task folder named or found for it): engage only if the task is ambiguous, has several parts, or needs research, planning or delegation, or the user asks for this method. If the user asks you not to use it, or it is one edit, one fact or one command, do not engage.
-- **Continuing** (a compaction summary, or a message continuing or resuming a task under `<workspace>/.atomic-decompose/`): take the folder the summary or user names. Otherwise, after a compaction summary, take the `active`, `stopped` or `complete` one with the latest `updated_at` in its `state.json`; in a new session, take the only such folder, and with several, list them with their governing questions and ask which. After a compaction summary run `ad log compaction --task <T>`. In a new session run `ad resume --task <T>`. Then run `ad handoff --task <T>` and follow its `Next command`. If the status is `handed_back`, stop following this method.
+- **Continuing** (a compaction summary, or a message continuing or resuming a task under `<workspace>/.atomic-decompose/`): take the folder the summary or user names. Otherwise, after a compaction summary, take the `active`, `stopped` or `complete` one with the latest `updated_at` in its `state.json`; in a new session, take the only such folder, and with several, list them with their governing questions and ask which. After a compaction summary run `ad log compaction --task <T>`. In a new session run `ad resume --task <T>`, then run `ad status --task <T>`. The previous session's executors are gone, so hold each `running` item. Skip the item a `needs_approval` stop's detail names, and the later steps of its chain. Run `ad complete <id> --task <T> --attempt <briefs> --verdict held --reason "executor lost with the previous session"`. For a chain, do this for its earliest running step only, then complete its later steps as delegation.md, *Chains* says. Then run `ad handoff --task <T>` and follow its `Next command`. If the status is `handed_back`, stop following this method.
 
 ## 1. Start
 
-`ad init --root <workspace> --statement "<the user's request verbatim>" --question "<one sentence the final result must answer>"`. Add `--mode main_session` when the user asks for work in this session or your host cannot delegate. If the user later says the method should not have engaged: `ad log wrong_engagement --task <T>`, then continue as normal work.
+`ad init --root <workspace> --statement "<the user's request verbatim>" --question "<one sentence the final result must answer>"`. Add `--mode main_session` when the user asks for work in this session or your host cannot delegate, and `--mode delegate` when the user asks for delegation. If the user later says the method should not have engaged: `ad log wrong_engagement --task <T>`, then continue as normal work.
 
 ## 2. Decompose
 
@@ -28,7 +28,14 @@ Read `references/decomposition.md` and follow it. It ends when `ad validate --ta
 
 Before you ask the user anything, run `ad status --task <T>`: never ask a question it shows as answered. If the user says something was already answered, run `ad log asked_again --task <T> --ref <Q-id>`.
 
-If no question is unanswered, skip to step 4. Otherwise run `ad asked --task <T> --ids <every unanswered Q-id>` and put all of them to the user in **one** message, each labelled *scope* or *user-only*, each with its default. Then stop and wait. For each reply run `ad answer --task <T> --id <Q> --text "<answer>" --source user`, or `--source default_accepted` when the user accepts a default without answering it. Validate again.
+**The plan the user saw.** Show the plan from `ad status`: each leaf's title and, for each writes item, the files it may change. Then run `ad log plan_shown --task <T> --data '{"writes": [{"id": "<id>", "paths": ["<file>", "<dir>/"]}]}'`, listing every writes item, with paths relative to the repository top. A path ending `/` covers everything under it. Later checks compare against this line, never against your memory.
+
+If no question is unanswered, show the plan as a notice that asks nothing, log it, and go to step 4. Otherwise:
+
+1. **Start early** only if your host has a blocking question tool and can run executors in the background, if the task is not in `main_session` mode, and `ad next` does not print `"one_entry": true`. Brief the first ready entries of `ad next` (step 4.3), each to a background executor, before you ask. Otherwise start nothing before the answers.
+2. Run `ad asked --task <T> --ids <every unanswered Q-id>`. Put all the questions to the user in **one** message, each labelled *scope* or *user-only* with its default, together with the plan, and log the plan. Then wait.
+3. For each reply run `ad answer --task <T> --id <Q> --text "<answer>" --source user`, or `--source default_accepted` when the user accepts a default without answering it. Validate again.
+4. Collect the replies of the items that started early and handle each one (delegation.md, *Replies*). If an answer made one unneeded, reverse its patch when it is a done writes item (delegation.md, *Reversing*), run `ad drop <id> --task <T> --unneeded`, and leave it out of the result.
 
 ## 4. Execute
 
@@ -36,16 +43,16 @@ Read `references/delegation.md` once for your host: how to delegate, your parall
 
 1. `ad next --task <T>`. Expand or drop each group listed in `expand` first (decomposition.md, *Re-entry*).
 2. If nothing is ready, nothing is running and `blocked` is not empty: `ad asked` for every open user-only question, ask them together, then `ad stop --condition blocked_on_user`. If no leaf is pending or running and `expand` is empty, go to step 5.
-3. Take the first ready batches, up to the lower of `max_parallel` (in `ad status`) and your host's cap, minus the batches still running. For each run `ad brief <ids> --task <T>` and pass the printed brief **unchanged** as the whole prompt of one executor.
+3. Take the first ready entries (one leaf, a batch, or a chain of steps), up to the lower of `max_parallel` (in `ad status`) and your host's cap, minus the entries still running. For each run `ad brief <ids> --task <T>` and pass the printed brief **unchanged** as the whole prompt of one executor. When `next` prints `"one_entry": true`, add `--mode main_session` and do the entry yourself.
 4. Handle each reply as it arrives, as delegation.md says, then go back to 1.
 
-Before any stop, dispatch nothing new and first handle the replies of the batches already running.
+Before any stop, dispatch nothing new and first handle the replies of the entries already running. A `needs_approval` detail starts with the item id.
 
 **Choices.** When a step has more than one viable option, compare them against the settled criteria. If none covers it, state default criteria: run `ad ask --type scope` for them and then `ad answer --source default_unconfirmed`. Record the outcome with `ad decide --task <T> --item <id> --question "<choice>" --criteria <Q-ids> --chosen "<option>" --reject "<option>::<why it lost>"` (one `--reject` for each rejected option). If later items in other branches must follow it, use their nearest common ancestor as `--item`.
 
 **Outside the plan.** Before deleting files, contacting a third party or making any change the user did not see in the plan: `ad stop --condition needs_approval --detail "<the step>"` and ask.
 
-**New scope question** from a result: `ad ask --type scope`, `ad asked`, finish the work it does not block, then `ad stop --condition blocked_on_user --detail "<question>"`. When the answer arrives, re-expand every node that is not done (decomposition.md, *Re-entry*).
+**New scope question** from a result: run `ad ask --type scope` and `ad asked`. Dispatch nothing new, handle the replies of the entries already running, then `ad stop --condition blocked_on_user --detail "<question>"`. When the answer arrives, re-expand every node that is not done (decomposition.md, *Re-entry*).
 
 ## Stops and resume
 
@@ -53,10 +60,10 @@ Before any stop, dispatch nothing new and first handle the replies of the batche
 
 ## Changed answer
 
-The user changes a settled answer: run `ad answer` with the new text. It prints `affected`, with each item's previous status in `was`.
+The user changes a settled answer: dispatch nothing new and handle the replies of the entries already running. Then run `ad answer` with the new text. It prints `affected`, with each item's previous status in `was`.
 
-- Discard a reply from a brief sent before the change: `complete` rejects it with `not_running` or `stale_attempt`, and delegation.md *Diffs* step 1 catches it before a diff is applied.
-- For items whose `was` is `done`, reverse their diffs latest first (delegation.md, *Reversing*).
+- Discard a reply from a brief sent before the change: `complete` rejects it with `not_running` or `stale_attempt`.
+- For items whose `was` is `done`, reverse their patches latest first (delegation.md, *Reversing*).
 - For items whose `was` is `failed`, re-add the items they caused to be dropped (decomposition.md, *Re-entry*).
 - Continue with step 4.
 
@@ -64,7 +71,7 @@ The result must name the affected items: in `ad status`, the items whose `needs`
 
 ## 5. Result and mark
 
-Run `ad finish --task <T>`, then `ad status --task <T>`, and write the result:
+Run `ad finish --task <T>`. It reruns the command checks of every done writes item against the workspace. If it fails with `checks_failed`, nothing has changed. Add the one fix leaf its `next` line gives, show the plan and log it, then continue step 4 and run `finish` again. A command whose fix leaf failed is skipped and listed in `unresolved`; name it in the result. Then run `ad status --task <T>` and write the result:
 
 1. The first sentence answers the governing question.
 2. Supporting points follow, grouped under the top-level items.
@@ -91,4 +98,4 @@ A command that exits 3 is a fault. Stop the work and report the error's message 
 | `record_write_failed` | `ad stop --condition fault` once. If it reports `record_torn`, run `ad resume` first. |
 | `record_torn` | `ad resume`, then rerun the failed command only if `resume`'s `applied` list lacks it. Report `torn_line`, then carry on; no stop. |
 | `task_locked` | Nothing more. Name the lock file; the user deletes it only when no other session is working on the task. |
-| `git` missing, `skill_missing`, a `SKILL_FAILED` reply | `ad stop --condition fault`, naming the cause. |
+| `git_missing`, `not_a_git_repo`, `git_failed`, `skill_missing`, a `SKILL_FAILED` reply | `ad stop --condition fault`, naming the cause. After the user's `resume`: if `complete` or `changes` faulted, run `complete --verdict held --reason "<the fault>"`. If `answer`, `mark`, `finish`, `verify` or `drop --unneeded` faulted, run the same command again. |
