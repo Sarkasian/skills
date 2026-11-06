@@ -23,14 +23,19 @@ Make one `ad add` call per node, parents before children.
 - `--parent root|<id> --title "<unique title>" --kind group|leaf`
 - A leaf also takes:
   - `--goal "<the one deliverable>"`;
-  - `--check "<entry>"`, once per checklist entry, each one checkable from the result file alone;
+  - `--check "<entry>"`, once per checklist entry a reader must judge, each one checkable from the result file alone;
+  - `--check-cmd "<command>"` for an entry a command can check: exit 0 means it holds. The script runs it in the item's working tree, so use paths relative to that tree, with no `cd` and no absolute workspace path. Never read `.atomic-decompose/` or `.git/`, which hold the command's own text, for example `! grep -rw calc_total pkg tests README.md`. A leaf needs at least one `--check` or `--check-cmd`;
   - `--returns "<format, for example a Markdown table with columns ...>"`.
 - `--needs Q1,Q2`: the questions whose answers the item uses. The script adds the needs of its dependencies itself.
 - `--depends <ids>`: the items whose results this item builds on. Naming a group means all of its leaves.
+- `--writes`: the item changes workspace files (code, config, docs). git records its change, so it returns no diff (delegation.md, *Workspace changes*). Leave it off an item that only writes its result file.
 - `--small`: a short item, such as a lookup, one small file or one short section. Small siblings run together in one brief.
 - `--skill <absolute path of SKILL.md>`: an installed skill whose description fits the item. Use the path your host lists for that skill (delegation.md, *Skill paths*).
+- `--chain-after <id>`: run this leaf as the next step after leaf `<id>`, done by the same executor. Use it when the leaf depends on `<id>`, both read and change largely the same files, no result between them could change the plan, and no approval sits between them. On `chain_invalid`, add the leaf again without it.
 
-Titles must be unique, and a dropped item's title still counts, so a replacement takes a new title. An item that changes workspace files returns its change as a diff in its result; the brief says so.
+Two leaves that will change the same file never run side by side: order them with `--depends`, and chain them with `--chain-after` when the chain stays within `max_chain`. A command that checks the task's end condition goes only on the writes leaf whose completion makes it true, depending on the leaves it covers. Never put it on a separate check leaf, since `finish` reruns only the commands of done writes items.
+
+Titles must be unique, and a dropped item's title still counts, so a replacement takes a new title.
 
 ## Validate
 
@@ -46,7 +51,7 @@ Run `ad validate --task <T>` until it prints `"ok": true`.
 
 ## Re-entry
 
-Come back here when one of the following happens, then `add` and `validate` again:
+Come back here when one of the following happens, then `add` and `validate` again. When the re-plan added a writes item, show the updated plan and log it (SKILL.md step 3, *The plan the user saw*):
 
 - **A discovery leaf is done.** Its group appears in `next`'s `expand`. Add the group's children from *Split*. If the discovery shows there is nothing to add, `ad drop <group>` and name the group in the result.
 - **A result contradicts the plan.** Drop the pending items of the nodes it contradicts and re-expand those nodes.
