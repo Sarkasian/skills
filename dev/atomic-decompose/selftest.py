@@ -3,11 +3,13 @@
 
 Standard library only, plus `git` for the writes-item checkpoints, worktrees and patches. Runs C-4 (the installed
 `skills/atomic-decompose/scripts/decompose.py`) in-process against a temporary folder with HOME
-pointed into it. Each assertion message starts with the IDs it verifies.
+pointed into it, and C-8 (`report.py` beside this file) on sample evaluation runs and weekly records. Each
+assertion message starts with the IDs it verifies.
 """
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -944,6 +946,221 @@ def test_replay_clears_worktree():
     run("resume", "--task", t)
     check(item(t, a)["worktree"] is None and item(t, a)["status"] == "pending",
           "[DM-2] a re-applied fail sets worktree to null without git")
+
+
+sys.path.insert(0, HERE)
+import report  # noqa: E402
+
+
+def report_run(*args, code=0):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = report.main([str(a) for a in args])
+    check(rc == code, f"[API-12] report {' '.join(map(str, args))} exited {rc}, expected {code}\n{err.getvalue()}")
+    return out.getvalue(), err.getvalue()
+
+
+def write_json(path, obj, lines=False):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(json.dumps(o) for o in obj) + "\n" if lines else json.dumps(obj))
+
+
+def query_split(held, stem="engage query"):
+    return next(q for q in (f"{stem} {n}" for n in range(100))
+                if (int(hashlib.sha256(q.encode()).hexdigest(), 16) % 10 >= 6) is held)
+
+
+def test_report_release():
+    base = os.path.join(TMP, "release", "evals")
+    runs = os.path.join(base, "runs")
+    case = {"prompt": "p", "expected_output": "o", "files": [], "discoverable_facts": [], "fallback_reply": "r",
+            "follow_ups": [], "weak_result": None}
+    cases = [dict(case, id=1, expectations=["a", "b"], covers=["choice"],
+                  planted_questions=[{"fact": "f1", "type": "scope"}, {"fact": "f2", "type": "user_only"}],
+                  scripted_answers=[{"fact": "f1", "answer": "x"}, {"fact": "f2", "answer": "y"}]),
+             dict(case, id=2, expectations=["c", "d"], covers=["long_run"], weak_result="files/old.md",
+                  planted_questions=[{"fact": "f3", "type": "scope"}], scripted_answers=[{"fact": "f3", "answer": "z"}])]
+    q_true, q_tune = query_split(True), query_split(False)
+    q_false = query_split(True, "quick ask")
+    write_json(os.path.join(base, "evals.json"), {"skill_name": "atomic-decompose", "evals": cases})
+    write_json(os.path.join(base, "trigger_evals.json"),
+               [{"query": q, "should_trigger": s, "reply": "r", "note": "n"}
+                for q, s in ((q_true, True), (q_false, False), (q_tune, True))])
+    long_dir = os.path.join(runs, "cursor", "long-task")
+    write_json(os.path.join(long_dir, "record.jsonl"),
+               [{"seq": 1, "ts": "2026-11-04T10:00:00.000Z", "event": "asked_again", "ref": "Q1", "data": {}}], True)
+    write_json(os.path.join(runs, "cursor", "load_tokens.json"), {"tokenizer": "t", "files": [], "tokens": 4100})
+
+    def line(c, arm, met=(True, True), attempt=1, interrupted="none", **kw):
+        r = {"harness": "cursor", "model": "m", "case": c, "arm": arm, "attempt": attempt,
+             "interrupted": interrupted, "triggered": None, "planted_asked": [], "discoverable_asked": 0,
+             "task_dir": None, "sessions": [], "subagent_attribution_verified": True,
+             "started_at": "2026-11-04T10:00:00Z", "ended_at": "2026-11-04T11:00:00Z",
+             "expectations": [{"text": f"e{i}", "met": m} for i, m in enumerate(met)]}
+        r.update(kw)
+        return r
+
+    asked1 = [{"fact": "f1", "in_round": True}, {"fact": "f2", "in_round": True}]
+    asked2 = [{"fact": "f3", "in_round": True}]
+    lines = [
+        line("task:1", "with", planted_asked=asked1),
+        line("task:2", "with", attempt=1, interrupted="permission_prompt", planted_asked=asked2),
+        line("task:2", "with", attempt=2, planted_asked=asked2, task_dir="long-task"),
+        line("task:1", "without", met=(True, False)),
+        line("task:2", "without", met=(False, False)),
+        line("task:1", "main_session", attempt=1, interrupted="denial"),
+        line("task:1", "main_session", attempt=2, interrupted="safety_stop"),
+        line("task:2", "main_session"),
+        line("task:1", "delegate_baseline", met=(False, True)),
+        line(f"engage:{q_true}", "with", met=(), interrupted="safety_stop", triggered=True),
+        line(f"engage:{q_false}", "with", met=(), triggered=False),
+        line(f"engage:{q_tune}", "with", met=(), triggered=False),
+    ]
+    write_json(os.path.join(runs, "cursor", "runs.jsonl"), lines, True)
+    report_run("release", "--runs", runs)
+    rep = json.load(open(os.path.join(runs, "report.json")))
+    md = open(os.path.join(runs, "report.md")).read()
+    t = {x["id"]: x for x in rep["targets"]}
+    check(t["NFR-1"]["value"] == 1.0 and t["NFR-1"]["met"],
+          "[NFR-1] [US-12.7] [DD-9] pooled with-arm expectations use attempt 2 and leave out delegate_baseline")
+    check(t["NFR-2"]["value"] == 0.75 and t["NFR-2"]["met"], "[NFR-2] with minus without on the same cases and model")
+    check(t["NFR-3"]["value"] == "not_computable" and not t["NFR-3"]["met"] and rep["pr6"]["escalate"],
+          "[NFR-3] [PR-6] Cursor tokens not computed: NFR-3 not_computable and escalated")
+    check(t["NFR-11"]["value"] == 0.5 and not t["NFR-11"]["met"],
+          "[NFR-11] [US-12.10] a twice-interrupted main-session run scores every expectation unmet")
+    check(t["NFR-4"]["value"] == 0.0 and t["NFR-9"]["value"] == 1.0,
+          "[NFR-4] [NFR-9] [US-12.10] held-out split per kind; an interrupted engagement run counts as wrong")
+    check(t["NFR-5"]["value"] == 1 and not t["NFR-5"]["met"], "[NFR-5] a re-ask in the long-run task record misses")
+    check(t["NFR-6"]["value"] == 1.0 and t["NFR-6"]["met"] and t["NFR-10"]["met"] and t["NFR-8"]["value"] == 4100,
+          "[NFR-6] [NFR-8] [NFR-10] planted, load and discoverable targets")
+    check(rep["gate"] == "fail" and "Release gate failed" in md and "NFR-11 (cursor)" in md,
+          "[US-12.4] the report states the gate failed and names the failed targets")
+    check(rep["exit_criterion_2"] == "not_met" and rep["exit_criterion_2_missing"] == [],
+          "[US-12.14] no without-method pass: exit criterion 2 is not met")
+    check(all(x["total"] is None and x["estimate"] is False for x in rep["tokens"]) and len(rep["tokens"]) == 7,
+          "[US-12.3] one token entry per task-case run, null until the Cursor export is pinned")
+    check(rep["delegate_baseline"] == {"total": None, "expectations_met": 1, "with_total": None,
+                                       "with_expectations_met": 2}, "[DD-9] delegate_baseline beside case 1's with run")
+    c10 = {(r["arm"], r["case"]) for r in rep["criterion_10_runs"]}
+    check(c10 == {("main_session", "task:1"), ("with", f"engage:{q_true}")} and "affects NFR-11" in md,
+          "[US-12.12] criterion 10 runs listed with the comparisons they affect")
+    check("task:2: attempt 1 permission_prompt" in md, "[US-12.7] an interrupted first attempt is a setup fault")
+    check("FAIL: e1" in md and "pass: e0" in md, "[US-12.3] pass or fail per expectation")
+    trig = [json.loads(x) for x in open(os.path.join(runs, "cursor", "trigger_runs.jsonl"))]
+    check({"query": q_true, "should_trigger": True, "triggered": False} in trig,
+          "[US-12.10] trigger_runs.jsonl flips an interrupted engagement run")
+
+    lines[3] = line("task:1", "without")
+    lines[0] = line("task:1", "with", planted_asked=asked1, subagent_attribution_verified=False)
+    write_json(os.path.join(runs, "cursor", "runs.jsonl"), lines, True)
+    report_run("release", "--runs", runs)
+    rep = json.load(open(os.path.join(runs, "report.json")))
+    check(rep["exit_criterion_2"] == "not_computable" and rep["exit_criterion_2_missing"] ==
+          [{"harness": "cursor", "lacks": "tokens"}, {"harness": "cursor", "lacks": "attribution"}]
+          and "could not be checked" in open(os.path.join(runs, "report.md")).read(),
+          "[US-12.6] exit criterion 2 not computable names each harness and what it lacks")
+    lines[0] = line("task:1", "with", met=(False, True))
+    lines[2] = line("task:2", "with", attempt=2, met=(True, False))
+    write_json(os.path.join(runs, "cursor", "runs.jsonl"), lines, True)
+    report_run("release", "--runs", runs)
+    check(json.load(open(os.path.join(runs, "report.json")))["exit_criterion_2"] == "met",
+          "[US-12.13] [US-12.15] no with-method pass while a without-method run passes: exit criterion 2 met")
+    lines[3] = line("task:1", "without", met=(False, False))
+    write_json(os.path.join(runs, "cursor", "runs.jsonl"), lines, True)
+    report_run("release", "--runs", runs)
+    nfr3 = next(x for x in json.load(open(os.path.join(runs, "report.json")))["targets"] if x["id"] == "NFR-3")
+    check(nfr3["met"] and nfr3["value"] is None, "[NFR-3] met by definition when the without arm meets nothing")
+
+    with open(os.path.join(runs, "cursor", "runs.jsonl"), "w") as f:
+        f.write(json.dumps(lines[0]) + "\nnot json\n")
+    _, err = report_run("release", "--runs", runs, code=2)
+    check("bad_run_line" in err and "runs.jsonl:2" in err, "[API-12] a DM-8 line that does not parse")
+    cases[1]["scripted_answers"] = [{"fact": "other", "answer": "z"}]
+    write_json(os.path.join(base, "evals.json"), {"skill_name": "atomic-decompose", "evals": cases})
+    _, err = report_run("release", "--runs", runs, code=2)
+    check("case_mismatch" in err and "case 2" in err, "[API-13] scripted_answers and planted_questions differ")
+
+
+def test_report_weekly():
+    root = os.path.join(TMP, "weekly")
+    marks = os.path.join(root, "marks")
+    os.makedirs(marks)
+    week_ts = "2026-11-04T10:00:00.000Z"
+
+    def task(harness, name, events, status="complete", questions=(), ts=week_ts):
+        d = os.path.join(root, harness, name)
+        write_json(os.path.join(d, "state.json"), {"schema_version": 1, "status": status,
+                                                   "questions": list(questions)})
+        write_json(os.path.join(d, "record.jsonl"), [{"seq": i, "ts": ts, "event": e, "ref": r, "data": dt}
+                                                    for i, (e, r, dt) in enumerate(events, 1)], True)
+        return d
+
+    done = [("engaged", None, {}), ("item_done", "I1", {}), ("stopped", None, {"condition": "complete"})]
+    t1 = task("cursor", "t1", [("engaged", None, {}), ("question_asked", "Q1", {}),
+                               ("answered", "Q1", {"source": "user"}), ("question_asked", "Q1", {}), *done[1:]],
+              questions=[{"id": "Q1", "round": 1, "answer_source": "user"}])
+    t2 = task("cursor", "t2", [("engaged", None, {}), ("question_asked", "Q1", {}),
+                               ("answered", "Q1", {"source": "default_accepted"}), ("item_failed", "I1", {}),
+                               ("stopped", None, {"condition": "fault"}), ("marked", None, {"mark": "reworked"})],
+              status="stopped", questions=[{"id": "Q1", "round": 1, "answer_source": "default_accepted"}])
+    task("codex", "t3", [("engaged", None, {}), ("wrong_engagement", None, {}),
+                         ("stopped", None, {"condition": "complete"})], status="handed_back")
+    f0 = task("cursor", "f00", [("question_asked", "Q1", {}), *done],
+              questions=[{"id": "Q1", "round": 1, "answer_source": None}])
+    fillers = [task("codex" if n % 2 else "cursor", f"f{n:02}", done) for n in range(2, 15)]
+    task("codex", "f01", [*done[:2], ("stopped", None, {"condition": "user_stop"})], status="stopped")
+    task("cursor", "old", done, ts="2026-10-01T10:00:00.000Z")
+    torn = task("cursor", "gap-torn", done)
+    with open(os.path.join(torn, "record.jsonl"), "a") as f:
+        f.write('{"seq": 4, "ts"')
+    bad = task("codex", "gap-state", done)
+    with open(os.path.join(bad, "state.json"), "w") as f:
+        f.write("{")
+    marks_file = os.path.join(marks, "2026-W45-marks.json")
+    write_json(marks_file, {"schema_version": 1, "week": "2026-W45", "preconditions_held_from": [],
+                            "sponsor_shorter_period": [],
+                            "sessions": [{"harness": "cursor", "task_dir": t2, "contradictions": 2},
+                                         {"harness": "cursor", "task_dir": t1, "contradictions": None}],
+                            "questions": [{"task_dir": t1, "ref": "Q1", "discoverable": True},
+                                          {"task_dir": t2, "ref": "Q1", "discoverable": False},
+                                          {"task_dir": f0, "ref": "Q1", "discoverable": None}]})
+    args = ("weekly", "--roots", f"cursor={os.path.join(root, 'cursor')}", f"codex={os.path.join(root, 'codex')}",
+            "--week", "2026-W45", "--marks", marks)
+    out, _ = report_run(*args)
+    res = json.loads(out)
+    m = {(x["id"], x["harness"]): x for x in res["metrics"]}
+    check(sorted(res["gaps"]) == sorted([torn, bad]) and m[("M-3", None)]["status"] == "measured",
+          "[API-12] [M-3] two gaps in 20 tasks are named and leave the week measured")
+    check(m[("M-1", None)]["value"] == 3, "[M-1] one re-ask from the record plus 2 review contradictions; null left out")
+    check(m[("M-2", None)]["value"] == 0.5, "[M-2] the DM-10 classification of asked questions, null left out")
+    check(m[("M-3", None)]["value"] == report.rate(1, 16),
+          "[M-3] tasks ending in the week, wrong engagements and user stops left out")
+    check(m[("M-4", None)]["value"] == report.rate(1, 17) and m[("M-5", None)]["value"] == report.rate(1, 18),
+          "[M-4] [M-5] pooled over both roots")
+    check(m[("M-7", None)]["status"] == "incomplete", "[M-7] fewer than 5 marked results is incomplete")
+    check(m[("M-8", None)]["value"] == 0.5, "[M-8] rounds with every default accepted, unanswered rounds left out")
+    check(m[("M-6", "codex")]["status"] == "unmeasured" and m[("M-9", "codex")]["status"] == "unmeasured"
+          and ("M-6", "cursor") not in m, "[M-6] [M-9] one entry per non-Cursor harness, none for Cursor")
+    check(json.load(open(os.path.join(marks, "2026-W45.json"))) == res, "[API-12] weekly writes <marks>/<week>.json")
+
+    with open(os.path.join(fillers[-1], "record.jsonl"), "a") as f:
+        f.write("{")
+    res = json.loads(report_run(*args)[0])
+    check(len(res["gaps"]) == 3 and all(x["status"] != "measured" for x in res["metrics"]),
+          "[API-12] three gaps in 20 tasks make the week incomplete")
+    os.rename(marks_file, marks_file + ".bak")
+    res = json.loads(report_run(*args)[0])
+    m = {(x["id"], x["harness"]): x for x in res["metrics"]}
+    check(m[("M-1", None)]["status"] == m[("M-2", None)]["status"] == "unmeasured",
+          "[API-12] no DM-10 file for the week: M-1 and M-2 unmeasured")
+    write_json(marks_file, {"schema_version": 2, "week": "2026-W45", "sessions": [], "questions": []})
+    _, err = report_run(*args, code=2)
+    check("marks_unreadable" in err and "schema_version" in err and "W45-marks.json" in err,
+          "[API-12] a DM-10 file with another schema_version names the file and field")
+    with open(marks_file, "w") as f:
+        f.write("{")
+    check("marks_unreadable" in report_run(*args, code=2)[1], "[API-12] a DM-10 file that is not JSON")
 
 
 def main():
