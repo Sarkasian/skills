@@ -4,7 +4,7 @@ Agent skills in the [Agent Skills](https://agentskills.io/specification) layout:
 
 | Skill | What it does |
 | --- | --- |
-| [`atomic-decompose`](skills/atomic-decompose/SKILL.md) | Plans a substantial task as small work items, asks every question it needs from you once with a default, then works to completion from saved state, delegating items to sub-agents. |
+| [`atomic-decompose`](skills/atomic-decompose/SKILL.md) | Plans a substantial task as small work items, asks every question it needs from you once with a default, then works to completion from saved state: small jobs in the main session, independent parts by sub-agents in parallel. |
 
 ## Install
 
@@ -22,9 +22,9 @@ gh skill install <owner>/<repo> atomic-decompose --scope user
 
 By hand: copy `skills/atomic-decompose/` to `~/.agents/skills/` (read by Cursor, Codex and Zoo Code) and symlink `~/.claude/skills/atomic-decompose` to it (Claude Code). Install it in one location only, or a host that reads several folders may load it twice.
 
-Pin a release with `#<tag>` (`npx skills`) or `@<tag>` (`gh skill`). The skill runs a local Python script that edits your workspace files through git checkpoints and worktrees, so read it before installing (`gh skill preview`).
+Pin a release with `#<tag>` (`npx skills`) or `@<tag>` (`gh skill`). The skill runs a local Python script that edits your workspace files and makes one git commit per work item on your current branch, so read it before installing (`gh skill preview`).
 
-Requirements: `python3`, plus `git` and a workspace inside a git repository when a work item changes workspace files. The skill writes task state to `<workspace>/.atomic-decompose/<task-id>/`, which holds its own `.gitignore`, so it never shows in `git status`; checkpoints live under `refs/atomic-decompose/` until you accept the result.
+Requirements: `python3`, plus `git` and a workspace inside a git repository when a work item changes workspace files. The skill writes task state to `<workspace>/.atomic-decompose/<task-id>/`; the `.atomic-decompose/` folder holds its own `.gitignore`, so it never shows in `git status`. Parallel work runs in git worktrees inside the task folder, on `ad/<task-id>/` branches, and both are removed once the work has landed on your branch.
 
 ## Develop
 
