@@ -2,6 +2,8 @@
 
 Spec: `project documentation/atomic-decompose/atomic-decompose-tdd.md` (build-ready 2026-11-04). Plan: `~/.cursor/plans/atomic_decomposition_skill_5738b57e.plan.md`.
 
+**Version numbers in this log:** 0.2.0, 0.3.0, 0.3.1 and 0.4.0 below were working numbers for iterations between releases. On 2026-11-12 they were squashed into one release, 0.2.0. "The 0.4.0 redesign" is what 0.2.0 ships, and `CHANGELOG.md` has one 0.2.0 entry for all of it.
+
 ## Restart path
 1. Read this file, then the plan's todo list.
 2. `python3 dev/atomic-decompose/selftest.py` from the repo root must exit 0 before any new work.
@@ -88,6 +90,68 @@ Spec: `project documentation/atomic-decompose/atomic-decompose-tdd.md` (build-re
   - `weekly`: M-1 to M-5, M-7 and M-8, pooled across harnesses; M-1 and M-2 use the DM-10 marks, with null marks left out; tasks whose DM-1 is unreadable or whose record is torn are listed as gaps, and gaps above 10% make the week `incomplete`; a missing marks file makes M-1 and M-2 `unmeasured`; `marks_unreadable`; writes `<marks>/<week>.json`.
   - Choices: M-2 counts each asked question once per task. A zero denominator gives value null and status `incomplete`. M-8 leaves out rounds with an unanswered question.
 - Verification: `python3 dev/atomic-decompose/selftest.py` passes (new `test_report_release`, `test_report_weekly`). Mutation check: 12 single-line breaks in `report.py` each fail the selftest. The first pass missed three of them (the held-out hash, NFR-3 by definition, user stops in M-3), and assertions were added for each.
+
+## 2026-11-11 — Retro changes, release 0.2.0
+- Scope: every agreed change in the retro lists `project documentation/atomic-decompose-retro/improvements.md` (changes 0–22) and `issues-and-improvements.md` (A–E), in the `testing` workspace, built with this skill itself (task `.atomic-decompose/20261111-are-all-the-agreed-changes-in-improvemen/`, items 1.1–5.5, one commit per item). Per-change detail is in `CHANGELOG.md` 0.2.0 and in HOW-IT-WORKS *Changes from the retro (0.2.0)*.
+- Release (pauln, Q1): version 0.2.0 in `SKILL.md` metadata; the earlier Unreleased entries plus the retro changes form the 0.2.0 change-log section; no git tag.
+- Decisions during the build:
+  - Change 0: the cases went into the existing `selftest.py` rather than a new `scripts/test_decompose.py`; the script already had this runnable check.
+  - Change 1: planned paths come from `log plan_shown` (stored per item), not a new `add --paths` flag.
+  - Change 2: the clean-merge test is `git apply --3way --cached` on a temporary index, because `git apply --3way --check` exits 0 even when it would leave conflict markers (git 2.43).
+  - Change 14: JSON only; YAML would break the stdlib-only rule.
+  - C4: `finish` does not list delivered files itself; `status` shows each item's `deliver`, and SKILL.md result point 5 lists them.
+  - Script/doc inconsistencies found while building (Priority 4 widened): `accept`'s `approval_needed` next line said "accept again" (fixed in item 4.4), and `test_finish_review_leaf` read `brief`'s new JSON output as text (fixed in item 4.3).
+  - `no_check_commands` (TDD build, 2026-11-06) is removed again by change 16; the change log says so.
+- Docs: `SKILL.md`, `decomposition.md` and `delegation.md` document every new command and flag (items 5.1–5.3); this item added the 0.2.0 change log, the HOW-IT-WORKS status lines and a *Since 0.2.0* note in each older section a retro change altered, and two README corrections (refs are removed at `finish` too; commits only in commit mode).
+- Verification (2026-11-11):
+  - `python3 dev/atomic-decompose/selftest.py`: "selftest: all assertions hold", exit 0; 41 tests. Each retro change's case was checked to fail with the change reverted (per-item results in the task folder).
+  - Load size: `SKILL.md` + `decomposition.md` = 19,708 characters, about 4,930 tokens (chars/4), under the 20,000-character budget. `delegation.md` is 10,663 characters, read at delegation.
+  - `lint_skill.py --portable skills/atomic-decompose`: 0 errors. Warnings: the accepted no `--dry-run` and the two evals files that live under `dev/`, plus a new one: the description is 427 characters against the linter's 400 (it grew in item 5.3 to name the bad fit).
+- Still open: the description length warning (trim or accept); the item 5.5 whole-change review runs after this entry.
+
+- 2026-11-11: 0.3.0 built with atomic-decompose 0.2.0 as coordinator (task `.atomic-decompose/20261111-is-atomic-decompose-0-3-0-as-fast-as-it`, local branch `atomic-decompose-v0.3.0`, one commit per item; friction log `v0.3.0-build.md` in the testing workspace). Changes: `CHANGELOG.md` 0.3.0.
+  - Parallel same-file work: 13 work leaves, the script ones mostly in parallel worktrees on `decompose.py` and `selftest.py`; 4 merge leaves (2.3, 2.4, 5.3, 5.5, each resolved by hand in under 5 minutes), 2 of them real code merges in the same function. One semantic clash (4.2 re-adding an API-14 line) was caught by the combined selftest and fixed in 4.3.
+  - Known broken intermediate commit: 95c489d (5.2) holds 5.1's conflict markers, because 0.2.0 let a chain step pass while its predecessor was merging. The next commits fix it, and 5.4 makes 0.3.0 refuse it.
+  - Verification: `python3 dev/atomic-decompose/selftest.py`: "selftest: all assertions hold", 71 tests before the review fixes. Each script item's cases were checked to fail with its change reverted (per-item results in the task folder). Load size: `SKILL.md` 11,456 + `decomposition.md` 7,391 = 18,847 characters, under 20,000. `lint_skill.py --portable`: 0 errors, description 396 characters.
+  - Whole-change review (item 7) found two High defects caused by B: a merge-leaf deadlock with two merging items (H1) and lost work when a merge is undone (H2). Fix leaves 8.1–8.4 ran in parallel, each with its own test anchor, and all applied with no merge leaf. Selftest after the fixes: 76 tests, all hold.
+  - Open: C4–C9, E evals, and the review's named gaps and the build-log lessons (`CHANGELOG.md` 0.3.0 *Left out*).
+
+## 2026-11-12 — Haiku-test fixes, release 0.3.1
+- Source: `v0.3.0-haiku-test.md` (ids H1–H5, M1–M5, L1–L2, N1, N2, N4, P1–P4, R1–R8, Q1, Q2, agreed 2026-11-11; N3, N5, N6, N7 withdrawn) and the build spec `v0.3.1-spec.md`, both in `project documentation/atomic-decompose-retro/` in the `testing` workspace. Per-id detail: `CHANGELOG.md` 0.3.1 and HOW-IT-WORKS *Changes from the Haiku test (0.3.1)*.
+- Built with atomic-decompose as coordinator (task `.atomic-decompose/20261111-does-atomic-decompose-0-3-1-implement-ev`, local branch `atomic-decompose-v0.3.1`, one commit per item): script items S1–S9 (results 1.1–1.9) plus 1.10, which rewrapped S1's broken-command test cases in `sh -c` after S2's add-time check refused them; docs items D1 (2.1) and D2 (this entry, 2.2).
+- Decisions during the build (per-item results in the task folder):
+  - M5: a merge leaf's subject leaves out the titles of merge leaves in its chain, since joining them would bring back "Merge N with M"; their ids stay in the body.
+  - S5: a state written before requirements existed skips the requirement checks, because nothing can add requirements after init (`ponytail:` comment). `brief --reason` and `validate`'s state write needed small edits outside S5's listed functions.
+  - S6: the union merge runs on a temporary index; the user's index is never touched.
+- Item 2.3 pointed the stale help strings at the moved doc sections and made `finish` refuse `nothing_done` before its task checks.
+- Review 3 (result 3) found H-a, H-b, M-a, M-b, M-c and M-d, plus named gaps L-1 to L-7. Fix leaves 4.1 (H-a), 4.2 (H-b, L-6), 4.3 (M-a, M-b, L-3), 4.4 (M-c, L-2) and 4.5 (M-d, L-4) ran in parallel.
+- Review 5 (result 5) found every review-3 fix built and 12 of 13 reverts caught, and three Medium gaps: the release notes (F1), the root check letting the root through before `;`, `&`, `|`, `)`, `:` or a backtick (F2), and no test for the executor-file branch of the auto-result (F3). Fix leaves 6.1 (F2, F3) and 6.2 (F1, this entry) ran in parallel. Per-finding lines: `CHANGELOG.md` 0.3.1 *Fixed after review*.
+- Open: the S2 check-command limits and review 5's L-a (`CHANGELOG.md` 0.3.1 *Left out*); review 3's L-1, L-5, L-7 and review 5's L-b, L-c stay named gaps in results 3 and 5.
+- Load size after the fixes: SKILL.md 6,230 + decomposition.md 5,262 + delegation.md 3,504 = 14,996 characters (python `len()`), 4 under the 15,000 budget. `wc -c` prints 15,002 for the same files because it counts bytes.
+- Verification commands:
+  - `python3 dev/atomic-decompose/selftest.py` must print "selftest: all assertions hold" and exit 0. Each script item's cases were checked to fail with its change reverted (results 1.1–1.9, 4.1–4.5, 6.1).
+  - `git log atomic-decompose-v0.3.0..HEAD` lists one commit per item.
+  - Load size: `python3 -c "print(sum(len(open('skills/atomic-decompose/'+p, encoding='utf-8').read()) for p in ('SKILL.md', 'references/decomposition.md', 'references/delegation.md')))"` prints at most 15000 (D1's budget; the selftest counts the same way).
+  - `python3 /home/pauln/projects/testing/.cursor/skills/authoring-agent-skills/scripts/lint_skill.py --portable skills/atomic-decompose`: 0 errors expected.
+
+## 2026-11-12: 0.4.0 redesign
+
+- **Source:** the 0.3.1 retest (`v0.3.0-haiku-test.md`) showed Haiku with the skill still worse than Haiku alone. The structural review (`v0.4-structure-review.md`) and the spec (`v0.4-spec.md`), all in the same retro folder, were agreed with D1–D4.
+- **Built** on local branch `atomic-decompose-v0.4`, one commit per concern: the script with its selftest, the docs, then these notes. I wrote the script directly: it is one file, so under the 0.4 rules it is one run with one writer.
+- **Verification:**
+  - `python3 dev/atomic-decompose/selftest.py` prints "selftest: all assertions hold": 26 tests (24 flow tests plus the 2 kept report tests), in about 4 s.
+  - `lint_skill.py --portable skills/atomic-decompose` reports 0 errors.
+  - SKILL.md is 7,998 bytes and decompose.py 1,596 lines after the retest fixes; the selftest checks both caps.
+  - 40 concurrent `decide` calls on one task kept all 40 decisions.
+- **Review:** an independent read-only review of the branch diff found 15 problems, all reproduced. All 15 are fixed in one commit (listed in the working history, not in the squashed changelog), each with a selftest case. The fixes took the script over the spec's 1,500-line cap, so the cap is now 1,600.
+- **Retest** (`v0.4-retest.md` in the retro folder), on the installed copy:
+  - Four functions in one module. Sonnet: 39 s and 17 steps, against 3.6 min and 29 steps on 0.3.1. Haiku: three failed runs, each fixed (root checks; `out_of_order` and one executor per brief; a split `check_cmd` refused and hand git forbidden in the brief), then a clean fourth run in about 1 min 25 s against about 2 min alone.
+  - Four modules in separate files. Quality held with Sonnet coordinating; the speed and step marks were not met with either coordinator. The work landed as fast as the baseline, then the review added 35 to 75 s. The task is too small: the skill's fixed costs are 2 to 3 minutes.
+  - Eight modules, 48 functions. Haiku alone: 4 min 18 s. Sonnet coordinating: work landed at 2 min 25 s, complete with the review at 3 min 29 s, 156 of 156 spot checks. Haiku coordinating: a worker left two modules without tests, the review caught it, complete at 5 min 24 s.
+  - Haiku on the four-function task, latest version: three clean runs in four; the fourth put all four functions in one commit.
+- **Decided after the retests** (`CHANGELOG.md` 0.2.0): the review covers work executors did and skips the coordinator's own, with the user told the work has landed first; `next` names planned files an item never changed. The selftest has 26 tests.
+- **Open, not a priority:** more ideas for Haiku as coordinator. Sonnet coordinating met the marks.
+- **Squashed for the pull request:** the branch is one commit on `main`, the version is 0.2.0, and the changelog entries for the working iterations are merged into one. The unsquashed history is on the local branch `atomic-decompose-v0.4-unsquashed`.
 
 ## Next
 - Cursor token parsing in `report.py`, once pauln downloads a usage export and its columns are confirmed (PRD §12).

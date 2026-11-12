@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""Task state script for the atomic-decompose skill (standard library only).
+"""Task state script for the atomic-decompose skill (standard library only, plus git for commits).
 
-Run `python3 decompose.py <command> --help` for each command's flags.
-Every command except `init` takes `--task <task-dir>`. JSON on stdout
-(except `brief` and `handoff`, which print text); errors on stderr as
+Run `python3 decompose.py <command> --help` for each command's flags. Every command except
+`start` takes `--task <task-dir>`. JSON on stdout; errors on stderr as
 
     ERROR [<code>] <message>
     resolves: auto_retry | needs_fix | needs_user
-    next: <exact command>
+    next: <exact next step>
 
-Exit codes: 0 ok, 1 a check failed, 2 bad input, 3 saved-state fault.
+Exit codes: 0 ok, 1 a check failed or work is refused, 2 bad input, 3 saved-state fault.
+
+The coordinator plans and asks; this script groups the work. Items that share a file, or depend on
+each other, form one run: one executor does them in order, calling `done` after each. Runs that share
+no file work at once, each in its own git worktree. One run works in place.
 """
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import os
 import re
@@ -25,28 +29,27 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
-SCHEMA = 1
-RETRY_LIMIT = 2  # DD-12: at most RETRY_LIMIT + 1 attempts
-DEFAULT_MAX_BATCH = 4
-DEFAULT_MAX_PARALLEL = 4
-DEFAULT_MAX_CHAIN = 5
-DEFAULT_CHECK_TIMEOUT_S = 600
-SUMMARY_WORDS = 150
-WRITERS = {"init", "stop", "resume", "finish", "mark", "log", "add", "drop",
-           "ask", "asked", "answer", "brief", "complete", "decide", "verify"}
-LOG_EVENTS = ("compaction", "asked_again", "wrong_engagement", "tokens", "plan_shown")
+SCHEMA = 2
+VERSION = "0.2.0"
+TRIES = 3
+MAX_PARALLEL = 4
+CHECK_TIMEOUT_S = 600
+AUTO_FIXES = 2
+LOCK_WAIT_S = 60
+TAIL_LINES = 30
+TASK_DIR = ".atomic-decompose"
 SCRIPT = os.path.abspath(__file__)
-LEAF_ONLY = ("goal", "checklist", "check_commands", "check_runs", "returns", "discovers", "small", "writes",
-             "checkpoint", "worktree", "patch", "chain_after")
-REF_PREFIX = "refs/atomic-decompose"
+LOG_EVENTS = ("compaction", "asked_again", "wrong_engagement", "tokens")
+QUESTION_TYPES = ("scope", "user_only", "confirm")
+SOURCES = ("user", "default_accepted", "default_unconfirmed")
 
 
 class Fail(Exception):
     def __init__(self, code, message, exit_code=2, resolves="needs_fix", nxt=""):
         super().__init__(message)
-        self.code, self.message, self.exit_code = code, message, exit_code
-        self.resolves, self.nxt = resolves, nxt
+        self.code, self.message, self.exit_code, self.resolves, self.nxt = code, message, exit_code, resolves, nxt
 
 
 class Parser(argparse.ArgumentParser):
@@ -58,24 +61,19 @@ def _now():
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-def _append_line(path, text):
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(text + "\n")
-
-
-def _key(item_id):
-    return tuple(int(p) for p in item_id.split("."))
-
-
-def _parent(item_id):
-    return item_id.rsplit(".", 1)[0] if "." in item_id else "root"
+def _ts(text):
+    return _dt.datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=_dt.timezone.utc)
 
 
 def _csv(value):
     return [v.strip() for v in value.split(",") if v.strip()] if value else []
 
 
-# ---------------------------------------------------------------- state access
+def cmd_line(task, *args):
+    return " ".join([f"python3 {shlex.quote(SCRIPT)}", *args, "--task", shlex.quote(task.dir)])
+
+
+# ---------------------------------------------------------------- saved state
 
 class Task:
     def __init__(self, task_dir):
@@ -83,6 +81,7 @@ class Task:
         self.state_path = os.path.join(self.dir, "state.json")
         self.record_path = os.path.join(self.dir, "record.jsonl")
         self.lock_path = os.path.join(self.dir, ".lock")
+        self.plan_path = os.path.join(self.dir, "plan.json")
 
     def load(self):
         try:
@@ -90,547 +89,438 @@ class Task:
                 st = json.load(f)
         except (OSError, ValueError) as e:
             raise Fail("state_unreadable", f"cannot read {self.state_path}: {e}", 3, "needs_user",
-                       "restore state.json or start a new task")
+                       "restore state.json from a backup, or start a new task; do not overwrite it")
         if st.get("schema_version") != SCHEMA:
-            raise Fail("state_unreadable",
-                       f"{self.state_path} has schema_version {st.get('schema_version')!r}, this script reads {SCHEMA}",
-                       3, "needs_user", "finish the task with the script version that started it")
+            raise Fail("state_unreadable", f"{self.state_path} has schema_version {st.get('schema_version')!r}; "
+                       f"this script ({VERSION}) reads {SCHEMA}", 3, "needs_user",
+                       "finish the task with the script version that started it")
         return st
 
-    def record_lines(self):
-        """Return (parsed lines, torn last line text or None)."""
-        if not os.path.exists(self.record_path):
-            return [], None
-        with open(self.record_path, encoding="utf-8") as f:
-            raw = f.read()
-        lines = raw.split("\n")
-        if lines and lines[-1] == "":
-            lines.pop()
-        parsed, torn = [], None
-        for i, line in enumerate(lines):
-            try:
-                parsed.append(json.loads(line))
-            except ValueError:
-                if i == len(lines) - 1:
-                    torn = line
-                else:
-                    raise Fail("state_unreadable", f"{self.record_path} line {i + 1} does not parse", 3,
-                               "needs_user", "restore record.jsonl")
-        return parsed, torn
-
-    def lock(self):
+    def save(self, st):
+        st["updated_at"] = _now()
+        tmp = os.path.join(self.dir, f".state.{secrets.token_hex(4)}.tmp")
         try:
-            fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
-        except FileExistsError:
-            raise Fail("task_locked", f"{self.lock_path} exists: another command holds it or a crash left it",
-                       3, "needs_user", f"rm {shlex.quote(self.lock_path)}")
-
-    def unlock(self):
-        try:
-            os.remove(self.lock_path)
-        except FileNotFoundError:
-            pass
-
-
-class Writer:
-    """Appends one invocation's DM-5 lines (record first), then replaces state.json."""
-
-    def __init__(self, task, st, argv, cmd=None, next_seq=None, first_line_written=False):
-        self.task, self.st = task, st
-        self.cmd = cmd or secrets.token_hex(8)
-        self.argv = argv
-        self.first_written = first_line_written
-        self.seq = next_seq if next_seq is not None else st.get("applied_seq", 0) + 1
-        self.last = None
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(st, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, self.state_path)
+        except OSError as e:
+            with _quiet():
+                os.remove(tmp)
+            raise Fail("state_write_failed", f"cannot write {self.state_path}: {e}; the saved state is unchanged",
+                       3, "auto_retry", "fix the cause (disk, permissions), then rerun the same command")
 
     def event(self, event, ref=None, data=None):
-        line = {"seq": self.seq, "ts": _now(), "cmd": self.cmd,
-                "argv": None if self.first_written else self.argv,
-                "event": event, "ref": ref, "data": data or {}}
+        """Append one run-record line, cutting a torn last line (a crash mid-write) first."""
+        line = json.dumps({"ts": _now(), "event": event, "ref": ref, "data": data or {}}, ensure_ascii=False)
         try:
-            _append_line(self.task.record_path, json.dumps(line, ensure_ascii=False))
+            if os.path.exists(self.record_path):
+                with open(self.record_path, "rb+") as f:
+                    raw = f.read()
+                    if raw and not raw.endswith(b"\n"):
+                        f.seek(raw.rfind(b"\n") + 1)
+                        f.truncate()
+            with open(self.record_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
         except OSError as e:
-            raise Fail("record_write_failed", f"cannot append to {self.task.record_path}: {e}; state.json unchanged",
-                       3, "auto_retry", f"python3 {SCRIPT} resume --task {shlex.quote(self.task.dir)}")
-        self.first_written = True
-        self.seq += 1
-        self.last = line
+            raise Fail("record_write_failed", f"cannot append to {self.record_path}: {e}; state.json holds the "
+                       "change", 3, "auto_retry", "fix the cause; the run record misses this one line")
 
-    replay = False  # resume re-applies state only; git side effects already happened
+    def record(self):
+        if not os.path.exists(self.record_path):
+            return []
+        out = []
+        with open(self.record_path, encoding="utf-8") as f:
+            for line in f:
+                with _quiet(ValueError):
+                    out.append(json.loads(line))
+        return out
 
-    def commit(self):
-        if self.last:
-            self.st["applied_seq"] = self.last["seq"]
-            self.st["updated_at"] = self.last["ts"]
-        write_state(self.task, self.st)
+    def lock(self):
+        """Wait for the lock; take it over when the process that holds it is gone."""
+        end = time.monotonic() + LOCK_WAIT_S
+        while True:
+            try:
+                fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
+                return
+            except FileExistsError:
+                if not _holder_alive(self.lock_path):
+                    with _quiet():
+                        os.remove(self.lock_path)
+                    continue
+                if time.monotonic() > end:
+                    raise Fail("task_locked", f"{self.lock_path} is held by a live process for over {LOCK_WAIT_S}s",
+                               3, "needs_user", "wait for the other command to end, then rerun this one")
+                time.sleep(0.1)
+
+    def unlock(self):
+        with _quiet(OSError, ValueError):
+            with open(self.lock_path, encoding="utf-8") as f:
+                mine = int(f.read().strip()) == os.getpid()
+            if mine:
+                os.remove(self.lock_path)
 
 
-def write_state(task, st):
-    tmp = os.path.join(task.dir, f".state.{secrets.token_hex(4)}.tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(st, f, ensure_ascii=False, indent=1)
+class _quiet:
+    def __init__(self, *errors):
+        self.errors = errors or (OSError,)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, value, tb):
+        return kind is not None and issubclass(kind, self.errors)
+
+
+def _holder_alive(path):
     try:
-        os.replace(tmp, task.state_path)
-    except OSError as e:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise Fail("state_write_failed",
-                   f"cannot replace {task.state_path}: {e}; record.jsonl holds the change",
-                   3, "auto_retry", f"python3 {SCRIPT} resume --task {shlex.quote(task.dir)}")
+        with open(path, encoding="utf-8") as f:
+            text = f.read().strip()
+        pid = int(text) if text else None
+    except (OSError, ValueError):
+        return True
+    if pid is None:  # created, pid not written yet; empty for seconds means its writer died
+        with _quiet():
+            return time.time() - os.path.getmtime(path) < 5
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
-# ---------------------------------------------------------------- plan helpers
-
-def items_by_id(st):
-    return {it["id"]: it for it in st["items"]}
-
-
-def children(st, pid, live_only=True):
-    return [it for it in st["items"] if _parent(it["id"]) == pid
-            and (not live_only or it["status"] != "dropped")]
+def locked(task, fn):
+    task.lock()
+    try:
+        st = task.load()
+        return fn(st)
+    finally:
+        task.unlock()
 
 
-def descendants(st, pid):
-    return [it for it in st["items"] if it["id"].startswith(pid + ".")]
+# ---------------------------------------------------------------- plan
 
-
-def discoverer(st, gid):
-    for it in st["items"]:
-        if it["kind"] == "leaf" and it.get("discovers") == gid:
-            return it
-    return None
-
-
-def dep_leaves(st, dep_id):
-    """Leaves a depends_on entry stands for: itself, or a group's non-dropped descendant leaves."""
-    it = items_by_id(st).get(dep_id)
-    if not it:
+def _list(value):
+    if value is None:
         return []
-    if it["kind"] == "leaf":
-        return [it]
-    return [d for d in descendants(st, dep_id) if d["kind"] == "leaf" and d["status"] != "dropped"]
+    return [value] if isinstance(value, str) else list(value)
 
 
-def dep_met(st, dep_id):
-    it = items_by_id(st).get(dep_id)
-    if not it or it["status"] == "dropped":
-        return False
-    leaves = dep_leaves(st, dep_id)
-    return bool(leaves) and all(l["status"] == "done" for l in leaves)
-
-
-def needs_of(st, dep_id):
-    out = []
-    for leaf in dep_leaves(st, dep_id):
-        for q in leaf["needs"]:
-            if q not in out:
-                out.append(q)
-    it = items_by_id(st).get(dep_id)
-    if it:
-        for q in it["needs"]:
-            if q not in out:
-                out.append(q)
-    return out
-
-
-def dep_closure(st, item):
-    """Every item the depends_on chain of `item` reaches (group deps include their descendants)."""
-    by = items_by_id(st)
-    seen, stack = [], list(item["depends_on"])
-    while stack:
-        d = stack.pop()
-        if d in seen or d not in by:
-            continue
-        seen.append(d)
-        stack.extend(by[d]["depends_on"])
-        for desc in descendants(st, d):
-            if desc["id"] not in seen:
-                stack.append(desc["id"])
-    return seen
-
-
-def recompute_blocked(st):
-    qs = {q["id"]: q for q in st["questions"]}
-    for it in st["items"]:
-        it["blocked_by"] = [q for q in it["needs"] if q in qs and qs[q]["answer"] is None]
-
-
-def propagate_needs(st):
-    """Keep every item's needs a superset of the needs of the items its depends_on names."""
-    changed = True
-    while changed:
-        changed = False
-        for it in st["items"]:
-            for d in it["depends_on"]:
-                for q in needs_of(st, d):
-                    if q not in it["needs"]:
-                        it["needs"].append(q)
-                        changed = True
-
-
-def deferred_groups_to_expand(st):
-    out = []
-    for g in st["items"]:
-        if g["kind"] == "group" and g["status"] != "dropped" and not children(st, g["id"]):
-            d = discoverer(st, g["id"])
-            if d and d["status"] == "done":
-                out.append(g["id"])
-    return out
-
-
-def chain_of(st, item_id):
-    """The API-14 chain holding `item_id`, first step first (a lone leaf is a chain of one)."""
-    by = items_by_id(st)
-    it = by[item_id]
-    while it.get("chain_after") in by:
-        it = by[it["chain_after"]]
-    out = [it]
-    while True:
-        nxt = next((x for x in st["items"] if x.get("chain_after") == out[-1]["id"] and x["status"] != "dropped"),
-                   None)
-        if not nxt:
-            return out
-        out.append(nxt)
-
-
-def end_ref(st, it):
-    return f"{REF_PREFIX}/{st['task_id']}/{it['id']}-{it['briefs']}-end"
-
-
-def start_ref(st, it):
-    """A writes step starts at its brief checkpoint, or at the previous writes step's -end ref in its chain."""
-    if it.get("checkpoint"):
-        return it["checkpoint"]
-    by = items_by_id(st)
-    prev = by.get(it.get("chain_after"))
-    while prev is not None and not prev.get("writes"):
-        prev = by.get(prev.get("chain_after"))
-    return end_ref(st, prev) if prev else None
-
-
-def unrun_step(st, it):
-    """A chain step an earlier step of its run already stopped (steps before the run are all done)."""
-    by = items_by_id(st)
-    prev = by.get(it.get("chain_after"))
-    while prev is not None:
-        if prev["status"] in ("pending", "failed"):
-            return True
-        prev = by.get(prev.get("chain_after"))
-    return False
-
-
-def in_place_running(st):
-    return any(it.get("writes") and it["status"] == "running" and not it.get("worktree") for it in st["items"])
-
-
-def compute_next(st, lines=None):
-    ready, blocked = [], []
-    # a fail restores an in-place item's paths, which would wipe another writer's applied change
-    hold_writes = in_place_running(st)
-    for it in st["items"]:
-        if it["kind"] != "leaf" or it["status"] != "pending":
-            continue
-        if it["blocked_by"]:
-            blocked.append({"id": it["id"], "by": list(it["blocked_by"])})
-            continue
-        if hold_writes and it.get("writes"):
-            continue
-        if all(dep_met(st, d) for d in it["depends_on"]):
-            ready.append(it)
-    singles, pools = [], {}
-    for it in ready:
-        chain = chain_of(st, it["id"])
-        if len(chain) > 1:
-            # the entry runs from this step through each later step whose other needs are met
-            entry = [it]
-            for s in chain[chain.index(it) + 1:]:
-                if (s["status"] != "pending" or s["blocked_by"] or (hold_writes and s.get("writes"))
-                        or not all(dep_met(st, d) or d in {e["id"] for e in entry} for d in s["depends_on"])):
-                    break
-                entry.append(s)
-            singles.append(entry)
-        elif it.get("small") and it["attempts"] == 0 and not it.get("discovers"):
-            pools.setdefault((_parent(it["id"]), it.get("skill") or ""), []).append(it)
-        else:
-            singles.append([it])
-    batches = list(singles)
-    for pool in pools.values():
-        pool.sort(key=lambda x: _key(x["id"]))
-        for i in range(0, len(pool), st["max_batch"]):
-            batches.append(pool[i:i + st["max_batch"]])
-    pending = [it for it in st["items"] if it["status"] == "pending"]
-
-    def dependants(batch):
-        ids = {b["id"] for b in batch}
-        return sum(1 for p in pending if p["id"] not in ids and ids & set(dep_closure(st, p)))
-
-    batches.sort(key=lambda b: (0 if any(x.get("discovers") for x in b) else 1, -dependants(b),
-                                min(_key(x["id"]) for x in b)))
-    expand = deferred_groups_to_expand(st)
-    remaining = sum(1 for it in st["items"] if it["kind"] == "leaf" and it["status"] in ("pending", "running"))
-    out = {"mode": st["mode"], "ready": [[x["id"] for x in b] for b in batches], "blocked": blocked,
-           "expand": expand, "remaining": remaining + len(expand)}
-    if lines is not None:
-        out["one_entry"] = one_entry(st, out["ready"], lines)
-    return out
-
-
-def one_entry(st, ready, lines):
-    """DD-9: true only for a plan that was one entry from the start."""
-    if st.get("mode_explicit") and st["mode"] == "delegate":
-        return False
-    if any(g["kind"] == "group" and g["status"] != "dropped" and not children(st, g["id"]) for g in st["items"]):
-        return False
-    leaves = {it["id"] for it in st["items"] if it["kind"] == "leaf" and it["status"] != "dropped"}
-    started = [l for l in lines if l["event"] == "item_started"]
-    if not started:
-        return len(ready) == 1 and set(ready[0]) == leaves
-    first = {l["ref"] for l in started if l["cmd"] == started[0]["cmd"]}
-    return {l["ref"] for l in started} <= first and leaves <= first
-
-
-def require_item(st, item_id):
-    it = items_by_id(st).get(item_id)
-    if not it:
-        raise Fail("unknown_ref", f"no work item {item_id}", 2, "needs_fix", "decompose.py status --task <task>")
-    return it
-
-
-def require_question(st, qid):
-    for q in st["questions"]:
-        if q["id"] == qid:
-            return q
-    raise Fail("unknown_ref", f"no question {qid}", 2, "needs_fix",
-               "decompose.py ask --task <task> --type user_only --text <question> --default <default>")
-
-
-def under_task(task, path):
-    p = path if os.path.isabs(path) else os.path.join(task.dir, path)
-    p = os.path.realpath(p)
-    if not (p.startswith(os.path.realpath(task.dir) + os.sep) and os.path.isfile(p)):
-        raise Fail("result_missing", f"{path} is not a file under {task.dir}", 2, "needs_fix",
-                   "write the result file under the task folder, then run complete again")
-    return os.path.relpath(p, os.path.realpath(task.dir))
-
-
-def check_summary(text):
-    if len(text.split()) > SUMMARY_WORDS:
-        raise Fail("summary_too_long", f"summary has {len(text.split())} words, the limit is {SUMMARY_WORDS}",
-                   2, "needs_fix", "shorten the summary and run complete again")
-
-
-def check_skill(path):
-    if not os.path.isabs(path):
-        raise Fail("skill_path_not_absolute", f"--skill {path} is not absolute; expand any listing alias",
-                   2, "needs_fix", "pass the absolute SKILL.md path the host lists")
-    if not os.path.isfile(path):
-        raise Fail("skill_missing", f"no SKILL.md at {path}", 2, "needs_user",
-                   "install the skill or re-plan the item without it")
-
-
-# ---------------------------------------------------------------- git (writes items)
-# The user's index, branch and stash list are never touched: snapshots use a temporary index
-# and checkpoints live under hidden refs.
-
-def _git(cwd, *args, env=None, check=True):
-    try:
-        p = subprocess.run(["git", "-C", cwd, *args], capture_output=True, encoding="utf-8",
-                           errors="surrogateescape", env=env)
-    except FileNotFoundError:
-        raise Fail("git_missing", "git is not on the shell path; a --writes item needs it", 3, "needs_user",
-                   "install git, or drop the item and re-add it without --writes")
-    if check and p.returncode:
-        raise Fail("git_failed", f"git {' '.join(args)}: {p.stderr.strip()}", 3, "needs_user",
-                   "fix the repository, then run the command again")
+def _norm_path(p):
+    p = str(p).replace("\\", "/").strip()
+    while p.startswith("./"):
+        p = p[2:]
     return p
 
 
-def workspace_root(task):
-    return os.path.dirname(os.path.dirname(task.dir))
-
-
-def git_top(task, item_id):
-    root = workspace_root(task)
-    p = _git(root, "rev-parse", "--show-toplevel", check=False)
-    if p.returncode and _git(root, "rev-parse", "--is-bare-repository", check=False).stdout.strip() == "true":
-        raise Fail("git_failed", f"{root} is a bare repository, which has no working tree for item {item_id}; "
-                   "nothing was changed", 3, "needs_user", "run the task in a repository with a working tree")
-    if p.returncode:
-        raise Fail("not_a_git_repo", f"{root} is not inside a git repository, and item {item_id} changes "
-                   "workspace files; nothing was changed", 3, "needs_user",
-                   f"git -C {shlex.quote(root)} init, or drop the item and re-add it without --writes")
-    return p.stdout.strip()
-
-
-def snapshot(cwd, base):
-    """Tree of the working tree at `cwd` (untracked, not ignored files included), starting from `base`."""
-    tmp = tempfile.mkdtemp(prefix="ad-index-")
-    env = dict(os.environ, GIT_INDEX_FILE=os.path.join(tmp, "index"))
+def read_plan_file(path):
     try:
-        if base:
-            _git(cwd, "read-tree", base, env=env)  # keeps tracked files that match an ignore rule
-        # ponytail: a fresh index rehashes every file; slow on very large trees, upgrade path is
-        # copying the user's index into the temporary one first.
-        _git(cwd, "add", "-A", env=env)
-        return _git(cwd, "write-tree", env=env).stdout.strip()
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        text = sys.stdin.read() if path == "-" else open(path, encoding="utf-8").read()
+        plan = json.loads(text)
+    except OSError as e:
+        raise Fail("plan_unreadable", f"cannot read {path}: {e}", 2)
+    except ValueError as e:
+        raise Fail("plan_invalid", f"{path} is not JSON: {e}", 2, "needs_fix", "fix the JSON and rerun")
+    if not isinstance(plan, dict):
+        raise Fail("plan_invalid", "the plan must be one JSON object", 2)
+    return plan
 
 
-def checkpoint(top, ref):
-    head = _git(top, "rev-parse", "--verify", "-q", "HEAD^{commit}", check=False).stdout.strip()
-    env = dict(os.environ, GIT_AUTHOR_NAME="atomic-decompose", GIT_AUTHOR_EMAIL="atomic-decompose@localhost",
-               GIT_COMMITTER_NAME="atomic-decompose", GIT_COMMITTER_EMAIL="atomic-decompose@localhost")
-    sha = _git(top, "commit-tree", snapshot(top, head or None), *(["-p", head] if head else []),
-               "-m", f"atomic-decompose checkpoint {ref}", env=env).stdout.strip()
-    _git(top, "update-ref", ref, sha)
-    return sha
+def plan_items(plan):
+    items = plan.get("items") or []
+    if isinstance(items, dict):  # accept {"1": {...}} as well as a list
+        items = [dict(v, id=v.get("id", k)) if isinstance(v, dict) else v for k, v in items.items()]
+    return items
 
 
-def changed_files(top, base, tree):
-    out = _git(top, "diff", "--name-status", "--no-renames", "-z", base, tree).stdout.split("\0")
-    return [{"status": out[i], "path": out[i + 1]} for i in range(0, len(out) - 1, 2)]
+def normalise_item(raw):
+    if not isinstance(raw, dict):
+        return None
+    return {"id": str(raw["id"]) if raw.get("id") is not None else None,
+            "title": str(raw.get("title") or "").strip(), "goal": str(raw.get("goal") or "").strip(),
+            "covers": [str(c) for c in _list(raw.get("covers"))],
+            "files": [_norm_path(f) for f in _list(raw.get("files"))],
+            "check_cmd": [str(c) for c in _list(raw.get("check_cmd"))],
+            "check": [str(c) for c in _list(raw.get("check"))],
+            "needs": [str(q) for q in _list(raw.get("needs"))],
+            "depends": [str(d) for d in _list(raw.get("depends"))],
+            "skill": raw.get("skill") or None}
 
 
-def write_patch(top, base, tree, path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    _git(top, "diff", "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv",
-         "--no-color", f"--output={path}", base, tree)
+def plan_problems(st):
+    """Every problem in the plan at once, so one fix round clears them all."""
+    probs = []
+    if not st["question"]:
+        probs.append("`question`: one sentence the result must answer")
+    if not st["requirements"]:
+        probs.append("`requirements`: list each part of the request")
+    qids = {q["id"] for q in st["questions"]}
+    for q in st["questions"]:
+        if q["type"] not in QUESTION_TYPES:
+            probs.append(f"{q['id']}: `type` must be one of {', '.join(QUESTION_TYPES)}")
+        if not q["text"] or (not q["default"] and q.get("origin") != "block"):
+            probs.append(f"{q['id']}: needs `text` and a `default`")
+    live = [it for it in st["items"] if it["status"] != "dropped"]
+    if not live:
+        probs.append("`items`: the plan has no items")
+    ids, titles = {it["id"] for it in st["items"]}, {}
+    reqs = {f"R{i + 1}" for i in range(len(st["requirements"]))}
+    covered = set()
+    for it in live:
+        name = f"item {it['id']} ({it['title'] or 'no title'})"
+        if not it["title"]:
+            probs.append(f"{name}: needs a `title`")
+        elif it["title"] in titles:
+            probs.append(f"{name}: title also used by item {titles[it['title']]}")
+        titles.setdefault(it["title"], it["id"])
+        if not it["goal"]:
+            probs.append(f"{name}: needs a `goal`")
+        if it["files"] and not it["check_cmd"]:
+            probs.append(f"{name}: an item with `files` needs `check_cmd` (the repository's own test command)")
+        if not it["files"] and not (it["check"] or it["check_cmd"]):
+            probs.append(f"{name}: a read-only item needs `check` (points to judge its result by)")
+        for f in it["files"]:
+            if not f or os.path.isabs(f) or f == ".." or f.startswith("../") or "/../" in f \
+                    or f.split("/")[0] in (TASK_DIR, ".git"):
+                probs.append(f"{name}: file {f!r} must be a path inside the root, not under .git/ or {TASK_DIR}/")
+        for c in it["covers"]:
+            if c not in reqs:
+                probs.append(f"{name}: covers {c}, but requirements are {', '.join(sorted(reqs)) or 'none'}")
+        covered.update(it["covers"])
+        for q in it["needs"]:
+            if q not in qids:
+                probs.append(f"{name}: needs {q}, which is not a question")
+        for d in it["depends"]:
+            if d not in ids or d == it["id"]:
+                probs.append(f"{name}: depends on {d}, which is not another item")
+    for r in sorted(reqs - covered, key=lambda r: int(r[1:])):
+        probs.append(f"{r} ({st['requirements'][int(r[1:]) - 1]}): no item `covers` it")
+    if _cycle(st):
+        probs.append(f"`depends` has a cycle: {' -> '.join(_cycle(st))}")
+    # ponytail: sees a split command only by its flag, so ["npm", "test"] passes; upgrade: `command -v` first words.
+    if any(c.lstrip().startswith("-") for x in [st] + live for c in x["check_cmd"]):
+        probs.append('`check_cmd`: write each command whole in one string ("python3 -m unittest -q"), not as words')
+    return probs
 
 
-def remove_worktree(top, path):
-    _git(top, "worktree", "remove", "--force", path, check=False)
-    shutil.rmtree(path, ignore_errors=True)
-    _git(top, "worktree", "prune", check=False)
+def _cycle(st):
+    deps = {it["id"]: it["depends"] for it in st["items"] if it["status"] != "dropped"}
+    seen, stack = set(), []
+
+    def visit(i):
+        if i in stack:
+            return stack[stack.index(i):] + [i]
+        if i in seen or i not in deps:
+            return None
+        seen.add(i)
+        stack.append(i)
+        for d in deps[i]:
+            c = visit(d)
+            if c:
+                return c
+        stack.pop()
+        return None
+
+    for i in deps:
+        c = visit(i)
+        if c:
+            return c
+    return None
 
 
-def item_tree(task, top, it, base):
-    """The tree of a running writes item's current edits."""
-    return snapshot(os.path.join(task.dir, it["worktree"]) if it.get("worktree") else top, base)
-
-
-def ref_exists(top, ref):
-    return _git(top, "rev-parse", "--verify", "-q", ref, check=False).returncode == 0
-
-
-def step_span(task, st, top, it):
-    """(start, end) of a writes item's changes: its checkpoint to its tree, or a chain step's refs."""
-    if len(chain_of(st, it["id"])) == 1:
-        return it["checkpoint"], item_tree(task, top, it, it["checkpoint"])
-    if not ref_exists(top, end_ref(st, it)):
-        raise Fail("step_not_finished", f"chain step {it['id']} has no {end_ref(st, it)} ref, so it did not "
-                   "finish; do not pass it", 2, "needs_fix",
-                   f"python3 {SCRIPT} complete {it['id']} --task {shlex.quote(task.dir)} --attempt {it['briefs']} "
-                   "--verdict fail --reason 'step did not finish'")
-    return start_ref(st, it), end_ref(st, it) + "^{tree}"
-
-
-def end_writes(task, st, it, w):
-    """A writes attempt that did not pass: restore the paths it changed, or drop its worktree."""
-    if not it.get("writes") or it["status"] != "running":
-        return {}
-    wt = it.get("worktree")
-    it["worktree"] = None
-    if w.replay or unrun_step(st, it):  # an unrun chain step: the step that stopped the chain cleaned up
-        return {}
-    top = git_top(task, it["id"])
-    if wt:
-        remove_worktree(top, os.path.join(task.dir, wt))
-        return {"worktree_removed": wt}
-    base = start_ref(st, it)
-    tree = item_tree(task, top, it, base)
-    files = changed_files(top, base, tree)
-    if files:
-        tmp = os.path.join(task.dir, f".restore.{secrets.token_hex(4)}.patch")
-        try:
-            write_patch(top, base, tree, tmp)
-            _git(top, "apply", "-R", tmp)
-        finally:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-    return {"restored": [f["path"] for f in files]}
-
-
-# ---------------------------------------------------------------- config (DM-9)
-
-def config_paths(root):
-    return [os.path.join(root, ".atomic-decompose", "config.local.json"),
-            os.path.join(root, ".atomic-decompose", "config.json"),
-            os.path.join(os.path.expanduser("~"), ".config", "atomic-decompose", "config.json")]
-
-
-def _positive(path, field, value):
-    if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 1):
-        raise Fail("config_unreadable", f"{path}: {field} must be an integer >= 1", 2, "needs_user",
-                   f"fix {field} in {path}")
-
-
-def read_configs(root):
-    out = []
-    for p in config_paths(root):
-        if not os.path.exists(p):
+def apply_plan(st, plan, task):
+    """Merge a plan file into the state: new items are added; items not started are edited, or dropped by
+    `"status": "dropped"`. Items the file leaves out are kept as they are."""
+    out = {"added": [], "edited": [], "dropped": [], "kept": []}
+    if "question" in plan:
+        st["question"] = str(plan["question"] or "").strip()
+    if "requirements" in plan:
+        st["requirements"] = [str(r) for r in _list(plan["requirements"])]
+    if "check_cmd" in plan:
+        st["check_cmd"] = [str(c) for c in _list(plan["check_cmd"])]
+    by_q = {q["id"]: q for q in st["questions"]}
+    for raw in _list(plan.get("questions")):
+        if not isinstance(raw, dict):
             continue
-        try:
-            with open(p, encoding="utf-8") as f:
-                c = json.load(f)
-        except (OSError, ValueError) as e:
-            raise Fail("config_unreadable", f"{p}: not valid JSON ({e})", 2, "needs_user", f"fix {p}")
-        if not isinstance(c, dict) or c.get("schema_version") != SCHEMA:
-            raise Fail("config_unreadable", f"{p}: schema_version must be {SCHEMA}", 2, "needs_user", f"fix {p}")
-        _positive(p, "max_parallel", c.get("max_parallel"))
-        for name, prof in (c.get("profiles") or {}).items():
-            for field in ("max_batch", "max_parallel", "max_chain", "check_timeout_s"):
-                _positive(p, f"profiles.{name}.{field}", (prof or {}).get(field))
-        out.append(c)
+        q = by_q.get(str(raw.get("id"))) if raw.get("id") else None
+        if q is None:
+            q = {"id": f"Q{len(st['questions']) + 1}", "asked": False, "answer": None, "answer_source": None,
+                 "changed_at": None, "affected": [], "origin": "plan"}
+            st["questions"].append(q)
+        if q["answer"] is None:
+            q.update(type=str(raw.get("type") or "scope"), text=str(raw.get("text") or ""),
+                     default=str(raw.get("default") or ""), because=raw.get("because"))
+    by_id = {it["id"]: it for it in st["items"]}
+    alias, touched = {}, []
+    open_states = ("pending", "failed", "blocked")
+    for raw in plan_items(plan):
+        new = normalise_item(raw)
+        if new is None:
+            continue
+        old = by_id.get(new["id"]) if new["id"] else None
+        if raw.get("status") == "dropped":
+            if old is not None and old["status"] in open_states:
+                old["status"] = "dropped"
+                out["dropped"].append(old["id"])
+            continue
+        if old is None:
+            given, new["id"] = new["id"], str(max([int(i["id"]) for i in st["items"]] + [0]) + 1)
+            if given:
+                alias[given] = new["id"]
+            new.update(status="pending", tries=0, notes=[], commit=None, result=None, block=None, run=None,
+                       failure=None, origin="plan")
+            st["items"].append(new)
+            by_id[new["id"]] = new
+            out["added"].append(new["id"])
+        elif old["status"] in open_states:
+            fields = {k: new[k] for k in ("title", "goal", "covers", "files", "check_cmd", "check", "needs",
+                                          "depends", "skill")}
+            if any(old[k] != v for k, v in fields.items()) or (old["status"] != "pending"
+                                                                and raw.get("status") == "pending"):
+                old.update(fields, status="pending", block=None, failure=None, tries=0)
+                out["edited"].append(old["id"])
+        else:
+            out["kept"].append(old["id"])
+        touched.append(by_id[new["id"]])
+    for it in touched:  # `depends` may name the plan file's own ids for new items
+        it["depends"] = [alias.get(d, d) for d in it["depends"]]
+    probs = plan_problems(st)
+    if probs:
+        raise Fail("plan_invalid", f"{len(probs)} problem(s) in the plan:\n- " + "\n- ".join(probs), 2,
+                   "needs_fix", "fix every listed problem in the plan file, then rerun the same command")
+    write_plan_file(task, st)
     return out
 
 
-def resolve_config(root, profile_flag):
-    configs = read_configs(root)
-    profile = profile_flag
-    if profile is None:
-        profile = next((c["profile"] for c in configs if c.get("profile")), None)
-    prof = {}
-    if profile is not None:
-        prof = next(((c.get("profiles") or {})[profile] for c in configs
-                     if profile in (c.get("profiles") or {})), None)
-        if prof is None:
-            raise Fail("unknown_profile", f"no configuration file defines profile {profile!r}", 2, "needs_user",
-                       "add the profile to a config file or omit --profile")
-        prof = prof or {}
-    max_parallel = next((c["max_parallel"] for c in configs if c.get("max_parallel")), DEFAULT_MAX_PARALLEL)
-    if prof.get("max_parallel"):
-        max_parallel = min(max_parallel, prof["max_parallel"])
-    return {"profile": profile, "max_batch": prof.get("max_batch") or DEFAULT_MAX_BATCH, "max_parallel": max_parallel,
-            "max_chain": prof.get("max_chain") or DEFAULT_MAX_CHAIN,
-            "check_timeout_s": prof.get("check_timeout_s") or DEFAULT_CHECK_TIMEOUT_S}
+def write_plan_file(task, st):
+    """The task's own plan.json, with ids, is the file to edit for `plan`."""
+    plan = {"question": st["question"], "requirements": st["requirements"], "check_cmd": st["check_cmd"],
+            "questions": [{k: q[k] for k in ("id", "type", "text", "default", "because")} for q in st["questions"]],
+            "items": [{**{k: it[k] for k in ("id", "title", "goal", "covers", "files", "check_cmd", "check",
+                                              "needs", "depends", "skill")}, "status": it["status"]}
+                      for it in st["items"] if it["status"] != "dropped"]}
+    with open(task.plan_path, "w", encoding="utf-8") as f:
+        json.dump(plan, f, ensure_ascii=False, indent=1)
 
 
-# ---------------------------------------------------------------- commands
-# Each writing command: fn(task, st, args, w) -> output; it mutates st and emits events on w.
+# ---------------------------------------------------------------- git
 
-def cmd_stop(task, st, a, w):
-    if a.condition == "complete":
-        raise Fail("bad_condition", "stop --condition complete is not allowed; run finish", 2, "needs_fix",
-                   "decompose.py finish --task <task>")
-    st["status"], st["stop"] = "stopped", {"condition": a.condition, "detail": a.detail}
-    w.event("stopped", None, {"condition": a.condition})
-    return {"status": st["status"], "stop": st["stop"]}
+def git(cwd, *args, check=True, env=None):
+    try:
+        p = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, env=env)
+    except FileNotFoundError:
+        raise Fail("git_missing", "git is not installed", 3, "needs_user", "install git, or run without it")
+    if check and p.returncode != 0:
+        raise Fail("git_failed", f"git {' '.join(args)} failed in {cwd}: {(p.stderr or p.stdout).strip()[-800:]}",
+                   3, "needs_user", "fix the git problem it names, then rerun the same command")
+    return p
 
 
-def require_closed(st):
-    open_leaves = [it["id"] for it in st["items"] if it["kind"] == "leaf" and it["status"] in ("pending", "running")]
-    expand = deferred_groups_to_expand(st)
-    if open_leaves or expand:
-        raise Fail("open_items", f"open leaves {open_leaves}, groups to expand {expand}", 1, "needs_fix",
-                   "decompose.py next --task <task>")
+def git_top(path):
+    with _quiet(Fail):
+        p = git(path, "rev-parse", "--show-toplevel", check=False)
+        if p.returncode == 0:
+            return os.path.realpath(p.stdout.strip())
+    return None
 
+
+def head(cwd):
+    return git(cwd, "rev-parse", "HEAD").stdout.strip()
+
+
+def _sha_file(path):
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha1(f.read()).hexdigest()
+    except OSError:
+        return "<missing>"
+
+
+def dirty_files(top, root):
+    """{path relative to root: content hash, "?"-prefixed when untracked} for every changed or untracked file
+    under root, the task folder aside."""
+    p = git(top, "status", "--porcelain", "-z", "--untracked-files=all")
+    parts, out, i = p.stdout.split("\0"), {}, 0
+    rel_root = os.path.relpath(root, top).replace("\\", "/")
+    while i < len(parts):
+        entry = parts[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        paths = [entry[3:]]
+        if entry[0] in "RC":
+            paths.append(parts[i])
+            i += 1
+        for path in paths:
+            rel = path if rel_root == "." else (path[len(rel_root) + 1:] if path.startswith(rel_root + "/") else None)
+            if rel is None or rel.split("/")[0] == TASK_DIR:
+                continue
+            out[rel] = ("?" if entry.startswith("??") else "") + _sha_file(os.path.join(root, rel))
+    return out
+
+
+def untracked(value):
+    return value.startswith("?")
+
+
+def covered(path, files):
+    return any(path == f or (f.endswith("/") and path.startswith(f)) or path.startswith(f.rstrip("/") + "/")
+               for f in files)
+
+
+def changed_since(run_dir, top_of_run, snapshot):
+    """{path: hash} of the files that changed since `snapshot`."""
+    now = dirty_files(top_of_run, run_dir)
+    return {p: h for p, h in sorted(now.items()) if snapshot.get(p) != h}
+
+
+def add_paths(run_dir, paths, env=None):
+    """`git add -A` the paths, skipping those already gone from disk and index (a `git rm` or `git mv` source)."""
+    indexed = set(git(run_dir, "ls-files", "-z", "--", *paths, env=env).stdout.split("\0"))
+    keep = [p for p in paths if os.path.lexists(os.path.join(run_dir, p)) or p in indexed]
+    if keep:
+        git(run_dir, "add", "-A", "--", *keep, env=env)
+
+
+def save_patch(run_dir, paths, out_path):
+    """Write the diff of `paths` (new files included) to `out_path` without touching the real index."""
+    idx = git(run_dir, "rev-parse", "--git-path", "index").stdout.strip()
+    idx = idx if os.path.isabs(idx) else os.path.join(run_dir, idx)
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, GIT_INDEX_FILE=os.path.join(tmp, "index"))
+        if os.path.exists(idx):
+            shutil.copy(idx, env["GIT_INDEX_FILE"])
+        add_paths(run_dir, paths, env)
+        diff = git(run_dir, "diff", "--cached", "--binary", "HEAD", "--", *paths, env=env).stdout
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(diff)
+
+
+def restore_paths(run_dir, paths):
+    tracked = set(git(run_dir, "ls-tree", "-r", "--name-only", "HEAD", "--", *paths).stdout.split("\n")) - {""}
+    prefix = git(run_dir, "rev-parse", "--show-prefix").stdout.strip()
+    keep = [p for p in paths if prefix + p in tracked]
+    if keep:
+        git(run_dir, "checkout", "HEAD", "--", *keep)
+    gone = [p for p in paths if prefix + p not in tracked]
+    if gone:
+        git(run_dir, "rm", "-q", "--cached", "--ignore-unmatch", "--", *gone, check=False)
+    for p in gone:
+        with _quiet():
+            os.remove(os.path.join(run_dir, p))
+
+
+# ---------------------------------------------------------------- checks
 
 def run_check(command, cwd, log_path, timeout):
-    """Exit code of one shell command line, or None when it ran past `timeout` (its process group is killed)."""
+    """Exit code of one shell command, or None when it ran past `timeout` (its process group is killed)."""
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     with open(log_path, "wb") as log:
         kw = ({"start_new_session": True} if os.name == "posix"
@@ -647,1068 +537,1046 @@ def run_check(command, cwd, log_path, timeout):
             return None
 
 
-def finish_rerun(task, st):
-    """DD-24: rerun every done writes item's command entries in the workspace, before the lock."""
-    require_closed(st)
-    failed_cmds = {c for it in st["items"] if it["kind"] == "leaf" and it["status"] == "failed"
-                   for c in it.get("check_commands") or []}
-    rerun, failing, unresolved = [], [], []
-    for it in sorted(st["items"], key=lambda x: _key(x["id"])):
-        if not (it.get("writes") and it["status"] == "done"):
-            continue
-        for n, c in enumerate(it.get("check_commands") or [], 1):
-            log = f"results/{it['id']}-finish-check-{n}.log"
-            code = run_check(c, workspace_root(task), os.path.join(task.dir, log), st["check_timeout_s"])
-            entry = {"id": it["id"], "command": c, "exit_code": code, "log": log}
-            rerun.append(entry)
-            if code != 0:
-                (unresolved if c in failed_cmds else failing).append(entry)
-    if failing:
-        titles, title, n = {it["title"] for it in st["items"]}, "Fix the finish checks", 1
-        while title in titles:
-            n += 1
-            title = f"Fix the finish checks {n}"
-        cmds = list(dict.fromkeys(e["command"] for e in failing))
-        raise Fail("checks_failed", f"finish reran the command entries and these fail: {json.dumps(failing)}",
-                   1, "needs_fix",
-                   f"python3 {SCRIPT} add --task {shlex.quote(task.dir)} --parent root --kind leaf --writes "
-                   f"--title {shlex.quote(title)} --goal {shlex.quote('make these commands pass again')} "
-                   + " ".join(f"--check-cmd {shlex.quote(c)}" for c in cmds)
-                   + f" --returns {shlex.quote('what was wrong and what changed')}")
-    return {"rerun": rerun, "unresolved": unresolved}
-
-
-def cmd_finish(task, st, a, w):
-    require_closed(st)
-    st["status"], st["stop"] = "complete", {"condition": "complete", "detail": "every leaf done or failed"}
-    data = {"condition": "complete"}
-    rerun = getattr(a, "rerun", None)
-    if rerun is not None and any(it.get("writes") for it in st["items"]):
-        data.update(rerun=rerun["rerun"], cleaned=clean_git(task, st))
-    w.event("stopped", None, data)
-    out = {"status": st["status"], "stop": st["stop"]}
-    if rerun is not None:
-        out.update(rerun)
-    return out
-
-
-def cmd_mark(task, st, a, w):
-    if st["status"] != "complete":
-        raise Fail("not_complete", "mark needs a complete task; run finish first", 2, "needs_fix",
-                   "decompose.py finish --task <task>")
-    if a.mark == "reworked":
-        st["status"], st["stop"] = "active", None
-    data = {"mark": a.mark, "reason": a.reason}
-    if a.mark == "accepted" and not w.replay and any(it.get("writes") for it in st["items"]):
-        data["cleaned"] = clean_git(task, st)
-    w.event("marked", None, data)
-    return {"status": st["status"], "stop": st["stop"]}
-
-
-def clean_git(task, st):
-    """Delete the task's hidden refs and worktrees; state, record, results and patches stay."""
-    top = git_top(task, "with --writes")
-    refs = _git(top, "for-each-ref", "--format=%(refname)", f"{REF_PREFIX}/{st['task_id']}/").stdout.split()
-    for ref in refs:
-        _git(top, "update-ref", "-d", ref)
-    wt_dir = os.path.join(task.dir, "wt")
-    trees = sorted(os.listdir(wt_dir)) if os.path.isdir(wt_dir) else []
-    for name in trees:
-        remove_worktree(top, os.path.join(wt_dir, name))
-    shutil.rmtree(wt_dir, ignore_errors=True)
-    _git(top, "worktree", "prune", check=False)
-    for it in st["items"]:
-        if it.get("worktree"):
-            it["worktree"] = None
-    return {"refs": len(refs), "worktrees": len(trees)}
-
-
-def cmd_log(task, st, a, w):
-    data = {}
-    if a.data:
-        try:
-            data = json.loads(a.data)
-        except ValueError as e:
-            raise Fail("bad_input", f"--data is not JSON: {e}", 2)
-    if a.event == "wrong_engagement":
-        st["status"] = "handed_back"
-    if a.event == "plan_shown":
-        entries = data.get("writes") if isinstance(data, dict) else None
-        if not isinstance(entries, list) or not all(
-                isinstance(e, dict) and isinstance(e.get("paths"), list) for e in entries):
-            raise Fail("bad_input", 'plan_shown needs --data \'{"writes": [{"id": ..., "paths": [...]}]}\'', 2)
-        missing = [it["id"] for it in st["items"] if it.get("writes") and it["status"] != "dropped"
-                   and it["id"] not in {e.get("id") for e in entries}]
-        if missing:
-            raise Fail("bad_input", f"plan_shown must list every writes item; missing {missing}", 2)
-    w.event(a.event, a.ref, data)
-    return {"event": a.event}
-
-
-def cmd_add(task, st, a, w):
-    by = items_by_id(st)
-    if a.parent != "root":
-        parent = by.get(a.parent)
-        if not parent:
-            raise Fail("unknown_parent", f"no item {a.parent}", 2)
-        if parent["kind"] == "leaf" and parent.get("discovers"):
-            raise Fail("parent_is_discovery", f"{a.parent} is a discovery leaf and cannot have children", 2)
-        if parent["status"] != "pending":
-            raise Fail("parent_not_pending", f"{a.parent} is {parent['status']}", 2)
-    if any(it["title"] == a.title for it in st["items"]):
-        raise Fail("duplicate_title", f"an item already has the title {a.title!r}", 2, "needs_fix",
-                   "give the item a new title")
-    if a.kind == "leaf":
-        if not a.goal:
-            raise Fail("leaf_without_goal", "a leaf needs --goal", 2)
-        if not a.check and not a.check_cmd:
-            raise Fail("leaf_without_checklist", "a leaf needs at least one --check or --check-cmd", 2)
-        if not a.returns:
-            raise Fail("leaf_without_returns", "a leaf needs --returns", 2)
-        if a.small and a.writes:
-            raise Fail("bad_input", "a --small item changes no workspace file, so it cannot be --writes", 2)
-    elif a.writes or a.check_cmd:
-        raise Fail("bad_input", "--writes and --check-cmd are for a leaf", 2)
-    needs, depends = _csv(a.needs), _csv(a.depends)
-    qids = {q["id"] for q in st["questions"]}
-    for q in needs:
-        if q not in qids:
-            raise Fail("unknown_ref", f"no question {q}", 2)
-    for d in depends:
-        if d not in by:
-            raise Fail("unknown_ref", f"no item {d}", 2)
-        if by[d]["status"] == "dropped":
-            raise Fail("dangling_dependency", f"{d} is dropped; depend on the item that replaces it, or on none", 2)
-    if a.skill:
-        check_skill(a.skill)
-    if a.discovers:
-        g = by.get(a.discovers)
-        if (a.kind != "leaf" or not g or g["kind"] != "group" or children(st, g["id"])
-                or discoverer(st, g["id"]) or a.parent == g["id"] or a.parent.startswith(g["id"] + ".")):
-            raise Fail("not_deferrable", f"{a.discovers} is not a childless group without a discovery leaf", 2)
-    if a.chain_after:
-        prev = by.get(a.chain_after)
-        if not prev:
-            raise Fail("unknown_ref", f"no item {a.chain_after}", 2)
-        broken = [why for bad, why in (
-            (a.kind != "leaf" or prev["kind"] != "leaf", "chain steps are leaves"),
-            (a.chain_after not in depends, f"no dependency on {a.chain_after}"),
-            ((a.skill or None) != (prev.get("skill") or None), "a different skill"),
-            (bool(a.discovers), "a discovery leaf"),
-            (any(q not in needs_of(st, prev["id"]) for q in needs), f"a need {a.chain_after} lacks"),
-            (any(x.get("chain_after") == prev["id"] and x["status"] != "dropped" for x in st["items"]),
-             f"{a.chain_after} already has a next step"),
-            (prev["kind"] == "leaf" and len(chain_of(st, prev["id"])) + 1 > st.get("max_chain", DEFAULT_MAX_CHAIN),
-             "a chain longer than max_chain")) if bad]
-        if broken:
-            raise Fail("chain_invalid", f"--chain-after {a.chain_after}: {broken[0]}", 2)
-    if a.parent != "root":
-        parent = by[a.parent]
-        if parent["kind"] == "leaf":
-            parent["kind"] = "group"
-            for f in LEAF_ONLY:
-                parent.pop(f, None)
-            parent.update(summary=None, result=None, attempts=0)
-    sibs = [it for it in st["items"] if _parent(it["id"]) == a.parent]
-    n = max((_key(s["id"])[-1] for s in sibs), default=0) + 1
-    new_id = str(n) if a.parent == "root" else f"{a.parent}.{n}"
-    item = {"id": new_id, "title": a.title, "kind": a.kind, "needs": needs, "depends_on": depends,
-            "blocked_by": [], "skill": a.skill, "status": "pending", "attempts": 0, "briefs": 0,
-            "result": None, "summary": None}
-    if a.kind == "leaf":
-        item.update(goal=a.goal, checklist=list(a.check), check_commands=list(a.check_cmd), check_runs=[],
-                    returns=a.returns, discovers=a.discovers, small=bool(a.small), writes=bool(a.writes),
-                    checkpoint=None, worktree=None, patch=None, chain_after=a.chain_after)
-    st["items"].append(item)
-    propagate_needs(st)
-    recompute_blocked(st)
-    w.event("item_planned", new_id)
-    return {"id": new_id}
-
-
-def _drop(st, w, ids, cause):
-    by = items_by_id(st)
-    out = []
-    for i in ids:
-        if by[i]["status"] != "dropped":
-            by[i]["status"] = "dropped"
-            w.event("item_dropped", i, {"cause": cause})
-            out.append(i)
-    return out
-
-
-def cmd_drop(task, st, a, w):
-    it = require_item(st, a.id)
-    if a.unneeded:
-        if it["kind"] != "leaf" or it["status"] != "done":
-            raise Fail("not_droppable", f"drop --unneeded takes a done leaf; {a.id} is {it['status']}", 2)
-        if it.get("patch") and not w.replay:
-            top = git_top(task, a.id)
-            p = _git(top, "apply", "--check", os.path.join(task.dir, it["patch"]), check=False)
-            if p.returncode:
-                raise Fail("patch_not_reversed", f"{a.id}'s patch is still in the workspace; nothing was changed",
-                           1, "needs_fix", f"git -C {shlex.quote(top)} apply -R "
-                           f"{shlex.quote(os.path.join(task.dir, it['patch']))}, then drop again")
-        dropped = _drop(st, w, [a.id], "unneeded after answer")
-        recompute_blocked(st)
-        return {"dropped": dropped}
-    to_drop = []
-    if it["kind"] == "leaf":
-        if it["status"] in ("running", "done", "failed"):
-            raise Fail("not_droppable", f"{a.id} is {it['status']}", 2)
-        to_drop.append(it["id"])
-    else:
-        desc = sorted(descendants(st, it["id"]), key=lambda x: _key(x["id"]), reverse=True)
-        for d in desc:
-            if d["kind"] == "leaf" and d["status"] == "pending":
-                to_drop.append(d["id"])
-        live = [d for d in desc if d["kind"] == "leaf" and d["status"] in ("running", "done", "failed")]
-        for d in desc:
-            if d["kind"] == "group" and not any(l["id"].startswith(d["id"] + ".") for l in live):
-                to_drop.append(d["id"])
-        if not live:
-            to_drop.append(it["id"])
-    dropped = _drop(st, w, to_drop, a.cause)
-    extra = []
-    for i in dropped:
-        leaf = items_by_id(st)[i]
-        g = leaf.get("discovers")
-        if g and not children(st, g, live_only=False):
-            extra += _drop(st, w, [g], i)
-    recompute_blocked(st)
-    return {"dropped": dropped + extra}
-
-
-def cmd_ask(task, st, a, w):
-    if not a.default.strip():
-        raise Fail("empty_default", "every question needs a proposed default", 2)
-    qid = f"Q{len(st['questions']) + 1}"
-    st["questions"].append({"id": qid, "text": a.text, "type": a.type, "default": a.default, "round": None,
-                            "answer": None, "answer_source": None, "changed_at": None})
-    recompute_blocked(st)
-    w.event("question_added", qid, {"type": a.type})
-    return {"id": qid}
-
-
-def cmd_asked(task, st, a, w):
-    ids = _csv(a.ids)
-    qs = [require_question(st, q) for q in ids]
-    rnd = max((q["round"] for q in st["questions"] if q["round"] is not None), default=0) + 1
-    for q in qs:
-        q["round"] = rnd
-        w.event("question_asked", q["id"], {"type": q["type"]})
-    return {"ids": ids, "round": rnd}
-
-
-def cmd_answer(task, st, a, w):
-    q = require_question(st, a.id)
-    changed = q["answer"] is not None
-    affected = []
-    for it in st["items"]:
-        if a.id in it["needs"]:
-            entry = {"id": it["id"], "was": it["status"]}
-            if it["status"] == "done" and it.get("patch"):
-                entry["patch"] = os.path.join(task.dir, it["patch"])
-            affected.append(entry)
-    q["answer"], q["answer_source"] = a.text, a.source
-    if changed:
-        q["changed_at"] = _now()
-        undone = []
-        entries = {e["id"]: e for e in affected}
-        # items are in creation order, so a chain's earliest running step resets first and stops the chain
-        for it in st["items"]:
-            if a.id in it["needs"] and it["kind"] == "leaf" and it["status"] in ("running", "done", "failed"):
-                u = end_writes(task, st, it, w)
-                it["status"], it["attempts"] = "pending", 0
-                if u:
-                    entries[it["id"]].update(u)
-                    undone.append({"id": it["id"], **u})
-        if st["status"] == "complete":
-            st["status"], st["stop"] = "active", None
-        w.event("answer_changed", a.id, {"source": a.source, "affected": undone})
-    else:
-        w.event("answered", a.id, {"source": a.source})
-    recompute_blocked(st)
-    return {"id": a.id, "changed": changed, "affected": affected}
-
-
-def last_item_event(task, ref):
-    lines, _ = task.record_lines()
-    for line in reversed(lines):
-        if line.get("ref") == ref and line["event"] in ("item_done", "item_retried", "item_failed", "item_held",
-                                                         "item_blocked"):
-            if line["event"] == "item_held" and line["data"].get("reason") == "brief not delivered":
-                continue
-            return line["event"]
+def check_unrunnable(command, exit_code, log_text):
+    """Why `command` could not run at all (so its exit code judges the command, not the work), else None."""
+    # ponytail: plain text matches on the log; a test that prints `command not found` itself reads as broken.
+    # Upgrade path: run the command's first word through `shutil.which` before the check.
+    if exit_code in (126, 127):
+        return f"the shell could not run it (exit {exit_code})"
+    for text in ("command not found", "can't open file"):
+        if text in log_text:
+            return f"the log says {text!r}"
+    m = re.search(r"(?:^|\s)-m\s+([\w.]+)", command)
+    if m and re.search(rf"No module named '?{re.escape(m.group(1))}'?(?![\w.])", log_text):
+        return f"the module {m.group(1)} is not installed"
     return None
 
 
-def render_brief(task, st, items, mode):
+def run_checks(task, commands, cwd, stem, timeout):
+    """[(command, exit code or None, log path)] for each command; stops at the first failure."""
+    out = []
+    for n, command in enumerate(commands, 1):
+        log = os.path.join(task.dir, "logs", f"{stem}-{n}.log")
+        code = run_check(command, cwd, log, timeout)
+        out.append((command, code, log))
+        if code != 0:
+            break
+    return out
+
+
+def tail(path, n=TAIL_LINES):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return "".join(f.readlines()[-n:]).rstrip()
+    except OSError:
+        return ""
+
+
+# ---------------------------------------------------------------- runs
+
+def items_by_id(st):
+    return {it["id"]: it for it in st["items"]}
+
+
+def open_needs(st, it):
+    qs = {q["id"]: q for q in st["questions"]}
+    return [q for q in it["needs"] if qs[q]["answer"] is None]
+
+
+def plan_runs(st):
+    """Group the items that can start now into runs (lists of item ids, each in dependency order)."""
+    by = items_by_id(st)
+    pend = [it for it in st["items"] if it["status"] == "pending" and not open_needs(st, it)]
+    ready = {it["id"] for it in pend if all(by[d]["status"] == "done" for d in it["depends"])}
+    parent = {i: i for i in ready}
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def join(a, b):
+        parent[find(a)] = find(b)
+
+    def link_files(members):
+        ids = sorted(members, key=int)
+        for x in ids:
+            for y in ids:
+                if x < y and by[x]["files"] and by[y]["files"] and any(
+                        covered(f, by[y]["files"]) or covered(g, by[x]["files"])
+                        for f in by[x]["files"] for g in by[y]["files"]):
+                    join(x, y)
+
+    link_files(ready)
+    # an item waiting only on items in one run joins that run, so a chain runs in one executor
+    changed = True
+    while changed:
+        changed = False
+        for it in pend:
+            if it["id"] in parent:
+                continue
+            waiting = [d for d in it["depends"] if by[d]["status"] != "done"]
+            if waiting and all(d in parent for d in waiting) and len({find(d) for d in waiting}) == 1:
+                parent[it["id"]] = it["id"]
+                join(it["id"], waiting[0])
+                link_files(parent)
+                changed = True
+    groups = {}
+    for i in parent:
+        groups.setdefault(find(i), []).append(i)
+    runs = [_dep_order(by, g) for g in groups.values()]
+    runs.sort(key=lambda r: int(r[0]))
+    if st["mode"] == "main_session" and runs:
+        runs = [_dep_order(by, [i for r in runs for i in r])]
+    while len(runs) > st["max_parallel"]:  # ponytail: pack the two smallest runs together; a size-aware packer
+        runs.sort(key=len)                  # would balance wall time better
+        a, b = runs.pop(0), runs.pop(0)
+        runs.append(_dep_order(by, a + b))
+        runs.sort(key=lambda r: int(r[0]))
+    return runs
+
+
+def _dep_order(by, ids):
+    ids, out, done = sorted(ids, key=int), [], set()
+    while len(out) < len(ids):
+        for i in ids:
+            if i not in done and all(d not in ids or d in done for d in by[i]["depends"]):
+                out.append(i)
+                done.add(i)
+                break
+    return out
+
+
+def start_runs(task, st, groups):
+    """Create the runs (worktrees when more than one writes run starts at once) and write their briefs."""
+    by = items_by_id(st)
+    top = st["git_top"]
+    writes_runs = [g for g in groups if any(by[i]["files"] for i in g)]
+    if len(writes_runs) > 1 and not top:  # no git: no worktrees, so the writers take turns
+        groups = [writes_runs[0]] + [g for g in groups if g not in writes_runs]
+    use_worktrees = top is not None and len([g for g in groups if any(by[i]["files"] for i in g)]) > 1
+    # ponytail: ignored top-level entries (.venv, .env, node_modules) are linked, not copied, so checks run as
+    # in place; parallel checks that write into one shared ignored folder can race. Upgrade: copy them.
+    ignored = [p.rstrip("/") for p in git(top, "ls-files", "-o", "-i", "--exclude-standard", "--directory", "-z")
+               .stdout.split("\0") if p and "/" not in p.rstrip("/") and p.rstrip("/") != TASK_DIR] \
+        if use_worktrees else []
+    runs = []
+    for g in groups:
+        rid = f"r{len(st['runs']) + 1}"
+        run = {"id": rid, "items": g, "status": "active", "kind": "work", "started_at": _now(),
+               "worktree": None, "branch": None, "dir": st["root"], "base": head(top) if top else None,
+               "snapshot": {}, "self": len(groups) == 1 and st["mode"] != "delegate"}
+        if use_worktrees and any(by[i]["files"] for i in g):
+            wt = os.path.join(task.dir, "wt", rid)
+            branch = f"ad/{st['task_id']}/{rid}"
+            git(top, "worktree", "add", "-q", "-b", branch, wt, run["base"])
+            for p in ignored:
+                with _quiet():
+                    os.symlink(os.path.join(top, p), os.path.join(wt, p))
+            run.update(worktree=wt, branch=branch, links=ignored, dir=os.path.normpath(
+                os.path.join(wt, os.path.relpath(st["root"], top))))
+        elif top:  # a file of this run's items that is dirty already holds an earlier executor's partial work
+            files = [f for i in g for f in by[i]["files"]]
+            run["snapshot"] = {p: h for p, h in dirty_files(top, st["root"]).items() if not covered(p, files)}
+        for i in g:
+            by[i].update(status="running", run=rid)
+            task.event("item_started", i, {"run": rid, "try": by[i]["tries"] + 1})
+        st["runs"].append(run)
+        run["brief"] = write_brief(task, st, run)
+        runs.append(run)
+    return runs
+
+
+def write_brief(task, st, run):
     by = items_by_id(st)
     qs = {q["id"]: q for q in st["questions"]}
-    out = [f"BRIEF {st['task_id']}", f"Mode: {mode}", ""]
+    items = [by[i] for i in run["items"]]
+    used = {q for it in st["items"] for q in it["needs"]}  # an answer no item `needs` applies to every item
+    needs = sorted({q for it in items for q in it["needs"]} | {q for q in qs if q not in used and qs[q]["answer"]},
+                   key=lambda q: int(q[1:]))
+    done = lambda i: cmd_line(task, "done", i)  # noqa: E731
+    lines = [f"Task {st['task_id']}, items {', '.join(run['items'])}: you do all of them, alone, in this order. "
+             f"Work in {run['dir']} (cd there first; change files only there).",
+             f"Request: {st['question']}",
+             "One item at a time: do its goal and run its `done` command before you start the next item, "
+             "because `done` commits every change in the item's files. `done` runs the checks first; "
+             "on a failure it prints why: fix it and run `done` again, at most 3 times, then go on. "
+             "Only `done` commits: never run git commit, reset, clean or stash, or change the task folder.",
+             f"Need a fact only the user knows: {cmd_line(task, 'block', '<id>', '--question', shlex.quote('<q>'))}"
+             ", then go on.",
+             f"A step outside the goal (other files, deleting, contacting anyone): {cmd_line(task, 'block', '<id>', '--approval', shlex.quote('<step>'))}, then go on.",
+             f"When every item is finished, run {cmd_line(task, 'next')} and do what it prints."
+             if run["self"] else "Do not ask the user anything. Reply with one line per item saying what you did."]
+    if needs:
+        lines.append("Settled: " + "; ".join(f"{q}: {qs[q]['text']} = {qs[q]['answer']}" for q in needs))
+    live = [d for d in st["decisions"] if not d.get("superseded_by")]
+    if live:
+        lines.append("Decided: " + "; ".join(f"{d['id']}: {d['question']} = {d['chosen']}" for d in live))
     for it in items:
-        out.append(f"ITEM {it['id']} (attempt {it['briefs']}): {it['title']}")
-        out.append(f"Goal: {it['goal']}")
-        out.append("Place in plan:")
-        out.append(f"- {st['governing_question']}")
-        parts = it["id"].split(".")
-        ancestors = [".".join(parts[:i]) for i in range(1, len(parts))]
-        for anc in ancestors:
-            out.append(f"- {anc} {by[anc]['title']}")
-        out.append("Settled answers you need:")
-        for qid in it["needs"]:
-            q = qs.get(qid)
-            if q and q["answer"] is not None:
-                out.append(f"- {qid} ({q['type']}): {q['text']} -> {q['answer']}")
-        out.append("Settled decisions you must follow:")
-        scope = {it["id"], *ancestors, *dep_closure(st, it)}
-        for d in st["decisions"]:
-            if d["item"] in scope:
-                out.append(f"- {d['id']}: {d['question']} -> {d['chosen']}")
-        out.append("Results you build on:")
-        for dep in it["depends_on"]:
-            for leaf in dep_leaves(st, dep):
-                path = os.path.join(task.dir, leaf["result"]) if leaf["result"] else "none"
-                out.append(f"- {leaf['id']} {leaf['title']}: {leaf['summary']} (full result: {path})")
-        out.append(f"Skill: {it.get('skill') or 'none'}")
-        out.append("Completion checklist (give a CHECK pointer for each):")
-        out.extend(f"- [ ] {n}. {c}" for n, c in enumerate(it["checklist"], 1))
-        if it.get("check_commands"):
-            out.append("Checked by the script after you reply (you may run these while working; "
-                       "your run is not the proof):")
-            out.extend(f"- {c}" for c in it["check_commands"])
-        out.append(f"Return format: {it['returns']}")
-        if it["summary"] and last_item_event(task, it["id"]) in ("item_retried", "item_failed", "item_held"):
-            out.append(f"Previous attempt failed or was held because: {it['summary']}")
-        out.append(f"Write the full result to: {os.path.join(task.dir, 'results', it['id'] + '.md')}")
-        out.append(f"Edits: {edits_line(task, it)}")
-        if it.get("writes"):
-            out.append("Outside this item: submodule contents and files outside a sparse checkout; the checkpoint "
-                       "does not capture them and a failed attempt does not restore them")
-        if it.get("writes") and chain_of(st, it["id"]) and len(chain_of(st, it["id"])) > 1:
-            out.append(f"Chain checkpoint: after finishing this step, run `python3 {SCRIPT} checkpoint --task "
-                       f"{shlex.quote(task.dir)} {it['id']}`")
-        out.append("")
-    out.append("Reply rules: do not ask the user anything; if you need a fact only the user knows, reply "
-               "`BLOCKED <id> <attempt> <question>` for that item. Take no step outside your goal, such as "
-               "deleting files or contacting a third party; reply `APPROVAL <id> <attempt> <step>` instead. "
-               "If the named skill does not load, reply `SKILL_FAILED <id> <attempt> <skill>`. Do not edit "
-               "state.json. Change files only where the item's `Edits:` line allows; never copy the workspace, "
-               "and never write a diff or file contents you changed into the result file: describe the "
-               "changes in words, since git records them. For each other item, reply "
-               "`RESULT <id> <attempt> <path>` and a summary of at most 150 words, then one line "
-               "`CHECK <id> <n> <path>:<line>[-<line>]` for each numbered checklist entry, pointing at the "
-               "lines that show it is met, with `<path>` absolute.")
-    return "\n".join(out)
+        lines += ["", f"ITEM {it['id']}: {it['title']}" + (f"   [Skill: {it['skill']}, load it first]"
+                                                           if it["skill"] else "")]
+        if it["files"]:
+            lines.append(f"Files: {', '.join(it['files'])}")
+        else:
+            lines.append(f"Result: write it to {result_path(task, it)}; change no workspace file")
+        lines.append(f"Goal: {it['goal']}")
+        if it["check_cmd"]:
+            lines.append("Checks (`done` runs them): " + " && ".join(it["check_cmd"]))
+        if it["check"]:
+            lines.append("Judged by: " + "; ".join(it["check"]))
+        for note in it["notes"]:
+            lines.append(f"Note: {note}")
+        lines.append(f"Done: {done(it['id'])}")
+    path = os.path.join(task.dir, "briefs", f"{run['id']}.md")
+    for d in ("briefs", "results"):
+        os.makedirs(os.path.join(task.dir, d), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return path
 
 
-def cmd_brief(task, st, a, w):
-    ids = _csv(a.ids)
-    ready = {i for batch in compute_next(st)["ready"] for i in batch}
-    items = []
-    for i in ids:
-        it = require_item(st, i)
-        if i not in ready:
-            raise Fail("not_ready", f"{i} is not in next's ready list", 2, "needs_fix",
-                       "decompose.py next --task <task>")
-        if it.get("skill"):
-            check_skill(it["skill"])
-        prev = items_by_id(st).get(it.get("chain_after"))
-        if prev and prev["status"] != "done" and prev not in items:
-            raise Fail("not_ready", f"{i} follows chain step {prev['id']}; brief the chain from its first ready step",
-                       2, "needs_fix", "decompose.py next --task <task>")
-        items.append(it)
-    mode = a.mode or st["mode"]
-    writers = [it for it in items if it.get("writes")]
-    top = git_top(task, writers[0]["id"]) if writers else None
-    if top:
-        busy = git_operation(top)
-        if busy:
-            raise Fail("git_failed", f"a git {busy} is in progress in {top}; nothing was changed", 3, "needs_user",
-                       f"finish or abort the {busy}, then run brief again")
-    # The writes steps of one chain share one tree and count as one writer.
-    units = {chain_of(st, it["id"])[0]["id"] for it in writers}
-    # In place only when no other writer runs or is ready to run beside it; else each gets a worktree.
-    parallel = mode != "main_session" and st["max_parallel"] > 1
-    in_place = len(units) == 1 and not any(
-        x.get("writes") and (x["status"] == "running" or (parallel and x["id"] in ready and x["id"] not in ids))
-        for x in st["items"])
-    os.makedirs(os.path.join(task.dir, "results"), exist_ok=True)
-    shared = {}  # chain head id -> (worktree rel path) for this brief
-    for it in items:
-        it["status"] = "running"
-        it["attempts"] += 1
-        it["briefs"] += 1
-        it["check_runs"] = []
-        data = {}
-        if it.get("writes"):
-            chain = chain_of(st, it["id"])
-            key = chain[0]["id"]
-            first = key not in shared
-            it["checkpoint"], it["worktree"] = None, None
-            if first:
-                ref = f"{REF_PREFIX}/{st['task_id']}/{it['id']}-{it['briefs']}"
-                sha = checkpoint(top, ref)
-                it["checkpoint"] = ref
-                rel = None
-                if not in_place:
-                    # named after the first step of this brief, so a later re-run of the chain gets a fresh tree
-                    first_step = next(x for x in items if chain_of(st, x["id"])[0]["id"] == key)
-                    rel = os.path.join("wt", first_step["id"])
-                    held = {x.get("worktree") for x in st["items"] if x["status"] == "running" and x not in items}
-                    for s in chain:  # leftovers of this chain or of an undelivered brief
-                        old = os.path.join("wt", s["id"])
-                        if old not in held:
-                            remove_worktree(top, os.path.join(task.dir, old))
-                    _git(top, "worktree", "add", "--detach", os.path.join(task.dir, rel), sha)
-                shared[key] = rel
-            it["worktree"] = shared[key]
-            data = {"checkpoint": it["checkpoint"], "worktree": it["worktree"]}
-        w.event("item_started", it["id"], data)
-    return render_brief(task, st, items, mode)
+def result_path(task, it):
+    return it["result"] or os.path.join(task.dir, "results", f"{it['id']}.md")
 
 
-def git_operation(top):
-    """The git operation in progress in the repository at `top`, if any."""
-    gd = _git(top, "rev-parse", "--absolute-git-dir").stdout.strip()
-    if os.path.isdir(os.path.join(gd, "rebase-apply")):
-        return "am" if os.path.exists(os.path.join(gd, "rebase-apply", "applying")) else "rebase"
-    for name, op in (("rebase-merge", "rebase"), ("MERGE_HEAD", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick"),
-                     ("REVERT_HEAD", "revert"), ("BISECT_LOG", "bisect")):
-        if os.path.exists(os.path.join(gd, name)):
-            return op
+def prompt_for(path):
+    return f"Your whole task is the brief at {path}. Read it, then follow it."
+
+
+def settle_runs(task, st):
+    """Close every active run: unfinished items go back to pending, worktree commits land on HEAD in plan order.
+    Returns (closed runs, a stop dict or None)."""
+    by = items_by_id(st)
+    closed = []
+    for run in [r for r in st["runs"] if r["status"] == "active"]:
+        if run["kind"] == "review":
+            run["status"] = "closed"
+            closed.append(run)
+            continue
+        for i in run["items"]:
+            it = by[i]
+            if it["status"] == "running":
+                it["tries"] += 1
+                if it["tries"] >= TRIES:
+                    fail_item(task, st, it, "its executor returned without `done` three times")
+                else:
+                    it.update(status="pending", run=None)
+                    it["notes"].append("An earlier executor returned without running `done`" + (
+                        "." if run["worktree"] else "; its work may be partly there in the files"))
+                    task.event("item_retried", i, {"reason": "no done"})
+        if run["worktree"]:
+            stop = land_run(task, st, run)
+            if stop:
+                return closed, stop
+        run["status"] = "closed"
+        closed.append(run)
+    return closed, None
+
+
+def land_run(task, st, run):
+    top = st["git_top"]
+    picks = [line[2:] for line in git(top, "cherry", "HEAD", run["branch"], run["base"]).stdout.split("\n")
+             if line.startswith("+ ")]
+    clash = []
+    if picks:
+        p = git(top, "cherry-pick", *picks, check=False)
+        if p.returncode != 0:
+            clash = git(top, "diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
+            git(top, "cherry-pick", "--abort", check=False)
+            if not clash:  # git refused before picking: staged or uncommitted changes in the way
+                return {"condition": "land_blocked",
+                        "detail": f"git cannot land run {run['id']} on HEAD: {(p.stderr or p.stdout).strip()[-400:]}"
+                                  "; commit, unstage or stash what it names"}
+        else:
+            remap_commits(st, top)
+            run["landed"] = len(picks)
+    by = items_by_id(st)
+    left = dirty_files(git_top(run["dir"]), run["dir"])
+    for i in run["items"]:
+        it = by[i]
+        if it["status"] == "done" and clash:
+            it.update(status="pending", commit=None, run=None)
+            it["tries"] += 1
+            it["notes"].append(f"Its earlier attempt clashed in {', '.join(clash)} with work that landed meanwhile; "
+                               f"redo it on the current files (the attempt: `git show {run['branch']}`)")
+            task.event("merge_conflict", i, {"files": clash, "branch": run["branch"]})
+            if it["tries"] >= TRIES:
+                fail_item(task, st, it, f"it clashed with other work on landing; see branch {run['branch']}")
+        elif it["status"] != "done" and it["files"]:
+            kept = shelve(task, run, [p for p in left if covered(p, it["files"])], f"{i}-{run['id']}.patch")
+            if kept:
+                it["notes"].append(f"Its partial work from run {run['id']} {kept}")
+    for p, h in dirty_files(git_top(run["dir"]), run["dir"]).items():  # new files outside every item's files:
+        dest = os.path.join(st["root"], p)                               # finish lists them in untracked_left
+        if untracked(h) and not os.path.lexists(dest):
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copy2(os.path.join(run["dir"], p), dest, follow_symlinks=False)
+    git(top, "worktree", "remove", "--force", run["worktree"], check=False)
+    if not clash:
+        git(top, "branch", "-D", run["branch"], check=False)
     return None
 
 
-def edits_line(task, it):
-    if not it.get("writes"):
-        return "none: change no file outside the task folder except the result file"
-    root = workspace_root(task)
-    if not it.get("worktree"):
-        return (f"in place: edit and test the files under {root} directly; the script saved a checkpoint "
-                "and restores the paths you changed if this attempt fails")
-    top = git_top(task, it["id"])
-    sub = os.path.relpath(os.path.realpath(root), os.path.realpath(top))
-    folder = os.path.normpath(os.path.join(task.dir, it["worktree"], sub))
-    return (f"in your worktree only: edit and run tests under {folder}, a git worktree of {root}; "
-            f"do not change {root} itself. The script applies your changes when the item passes")
-
-
-def pass_writes(task, st, it, w, attempt):
-    """Save the item's changes as its patch; a worktree item's patch is applied to the workspace first."""
-    rel = os.path.join("patches", it["id"] + ".patch")
-    if w.replay:
-        it.update(patch=rel, worktree=None)
-        return {"patch": rel}
-    top = git_top(task, it["id"])
-    base, tree = step_span(task, st, top, it)
-    files = changed_files(top, base, tree)
-    path = os.path.join(task.dir, rel)
-    tmp = path + ".new"
-    write_patch(top, base, tree, tmp)
-    if it.get("worktree") and files:
-        p = _git(top, "apply", "--check", tmp, check=False)
-        if p.returncode:
-            os.remove(tmp)
-            msg = p.stderr.strip()
-            raise Fail("patch_conflict", f"{it['id']}'s changes do not apply to the workspace, nothing was "
-                       f"changed: {msg}", 1, "needs_fix",
-                       f"python3 {SCRIPT} complete {it['id']} --task {shlex.quote(task.dir)} --attempt {attempt} "
-                       f"--verdict fail --reason {shlex.quote('clash: ' + msg)}")
-        _git(top, "apply", tmp)
-    os.replace(tmp, path)
-    wt = it.get("worktree")
-    it.update(patch=rel, worktree=None)
-    # a chain's shared worktree stays until the last step run completes
-    if wt and not any(x.get("worktree") == wt and x["status"] == "running" for x in st["items"]):
-        remove_worktree(top, os.path.join(task.dir, wt))
-    return {"patch": rel, "files": files}
-
-
-def require_checks_passed(task, it, attempt):
-    cmds = it.get("check_commands") or []
-    runs = it.get("check_runs") or []
-    if not cmds:
-        return
-    t = shlex.quote(task.dir)
-    if len(runs) != len(cmds):
-        raise Fail("checks_not_passed", f"{it['id']} has command entries and no verify run of attempt {attempt}",
-                   1, "needs_fix", f"python3 {SCRIPT} verify {it['id']} --task {t}")
-    for n, r in enumerate(runs, 1):
-        if r["exit_code"] != 0:
-            reason = f"check failed: {r['command']}, log results/{it['id']}-{attempt}-check-{n}.log"
-            raise Fail("checks_not_passed", f"{it['id']}: `{r['command']}` exited {r['exit_code']}", 1, "needs_fix",
-                       f"python3 {SCRIPT} complete {it['id']} --task {t} --attempt {attempt} --verdict fail "
-                       f"--reason {shlex.quote(reason)}")
-
-
-def cmd_complete(task, st, a, w):
-    it = require_item(st, a.id)
-    if it["status"] != "running":
-        raise Fail("not_running", f"{a.id} is {it['status']}; discard this reply", 2, "needs_fix",
-                   "decompose.py next --task <task>")
-    if a.attempt != it["briefs"]:
-        raise Fail("stale_attempt", f"attempt {a.attempt} is not the latest brief {it['briefs']}; discard this reply",
-                   2, "needs_fix", "decompose.py next --task <task>")
-    out = {"id": a.id}
-    if a.verdict == "pass":
-        if not a.result or a.summary is None:
-            raise Fail("bad_input", "pass needs --result and --summary", 2)
-        rel = under_task(task, a.result)
-        check_summary(a.summary)
-        if not w.replay:
-            require_checks_passed(task, it, a.attempt)
-        data = pass_writes(task, st, it, w, a.attempt) if it.get("writes") else {}
-        if "files" in data:
-            out["files"] = data["files"]
-        it.update(status="done", result=rel, summary=a.summary)
-        w.event("item_done", a.id, {"patch": data["patch"]} if data else None)
-        recompute_blocked(st)
-        out.update(status=it["status"], attempts=it["attempts"])
-        return out
-    if a.verdict == "fail" and not a.reason:
-        raise Fail("bad_input", "fail needs --reason", 2)
-    if a.verdict == "blocked":
-        if not a.question:
-            raise Fail("bad_input", "blocked needs --question", 2)
-        require_question(st, a.question)
-    if a.verdict == "held" and not a.reason:
-        raise Fail("bad_input", "held needs --reason", 2)
-    result = under_task(task, a.result) if a.verdict == "fail" and a.result else None
-    undone = end_writes(task, st, it, w)
-    if a.verdict == "fail":
-        it["result"] = result
-        it["summary"] = a.reason
-        if it["attempts"] >= RETRY_LIMIT + 1:
-            it["status"] = "failed"
-            w.event("item_failed", a.id, undone)
-            g = it.get("discovers")
-            if g and not children(st, g, live_only=False) and items_by_id(st)[g]["status"] != "dropped":
-                out["dropped"] = _drop(st, w, [g], a.id)
-            out["dependants"] = [p["id"] for p in st["items"]
-                                 if p["status"] == "pending" and a.id in dep_closure(st, p)]
-        else:
-            it["status"] = "pending"
-            w.event("item_retried", a.id, undone)
-    elif a.verdict == "blocked":
-        if a.question not in it["needs"]:
-            it["needs"].append(a.question)
-        it["status"] = "pending"
-        it["attempts"] -= 1
-        propagate_needs(st)
-        w.event("item_blocked", a.id, {"question": a.question, **undone})
-    else:  # held
-        it.update(status="pending", summary=a.reason)
-        it["attempts"] -= 1
-        w.event("item_held", a.id, {"reason": a.reason, **undone})
-    recompute_blocked(st)
-    out.update(status=it["status"], attempts=it["attempts"])
-    if undone:
-        out.update(undone)
+def item_commits(cwd, st):
+    """{item id: sha} for this task's commits since the task began, newest first wins."""
+    log = git(cwd, "log", "--format=%H %(trailers:key=AD-Item,valueonly,separator=)", f"{st['base_head']}..HEAD")
+    out = {}
+    for line in log.stdout.split("\n"):
+        sha, _, trailer = line.partition(" ")
+        task_id, _, item = trailer.strip().rpartition("/")
+        if task_id == st["task_id"]:
+            out.setdefault(item, sha)
     return out
 
 
-def cmd_decide(task, st, a, w):
-    require_item(st, a.item)
-    criteria = _csv(a.criteria)
-    if not criteria:
-        raise Fail("bad_input", "decide needs at least one --criteria question", 2)
-    for c in criteria:
-        require_question(st, c)
-    if not a.reject:
-        raise Fail("no_rejected_option", "a decision needs at least one --reject \"<option>::<reason>\"", 2)
-    rejected = []
-    for r in a.reject:
-        if "::" not in r:
-            raise Fail("bad_input", f"--reject {r!r} must be \"<option>::<reason>\"", 2)
-        opt, reason = r.split("::", 1)
-        rejected.append({"option": opt.strip(), "reason": reason.strip()})
-    did = f"D{len(st['decisions']) + 1}"
-    st["decisions"].append({"id": did, "item": a.item, "question": a.question, "criteria": criteria,
-                            "chosen": a.chosen, "rejected": rejected})
-    w.event("decided", did, {"item": a.item})
-    return {"id": did}
+def remap_commits(st, top):
+    for item, sha in item_commits(top, st).items():
+        if item in items_by_id(st):
+            items_by_id(st)[item]["commit"] = sha
 
 
-COMMANDS = {"stop": cmd_stop, "finish": cmd_finish, "mark": cmd_mark, "log": cmd_log, "add": cmd_add,
-            "drop": cmd_drop, "ask": cmd_ask, "asked": cmd_asked, "answer": cmd_answer, "brief": cmd_brief,
-            "complete": cmd_complete, "decide": cmd_decide}
+def fail_item(task, st, it, reason):
+    it.update(status="failed", failure=reason)
+    task.event("item_failed", it["id"], {"reason": reason})
+    for other in st["items"]:  # work that needs a failed item cannot happen; the rest carries on
+        if other["status"] in ("pending", "blocked", "running") and it["id"] in other["depends"]:
+            fail_item(task, st, other, f"it depends on item {it['id']}, which failed")
 
 
-# ---------------------------------------------------------------- init, resume, views
+def review_due(st):
+    """auto: review what executors wrote; the coordinator watched its own work being written."""
+    if st["review"] == "never" or st["review_state"] != "none":
+        return False
+    done = {it["id"] for it in st["items"] if it["status"] == "done" and it["files"]}
+    return bool(done) if st["review"] == "always" else any(
+        not r.get("self") and done & set(r["items"]) for r in st["runs"])
 
-def slug(text):
-    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40].rstrip("-")
+
+def unchanged_note(items):
+    quiet = [f"item {it['id']} never changed {', '.join(it['untouched'])}" for it in items
+             if it["status"] == "done" and it.get("untouched")]
+    return "; ".join(quiet) + ". If that work was forgotten, add an item for it." if quiet else None
 
 
-def cmd_init(a, argv):
-    cfg = resolve_config(a.root, a.profile)
-    base = os.path.join(os.path.abspath(a.root), ".atomic-decompose")
-    stem = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d") + "-" + slug(a.question)
-    task_id, n = stem, 1
-    while os.path.exists(os.path.join(base, task_id)):
+def start_review(task, st):
+    rid = f"r{len(st['runs']) + 1}"
+    path = os.path.join(task.dir, "review.md")
+    items = [it for it in st["items"] if it["status"] == "done"]
+    lines = [f"Review task {st['task_id']}, read-only: change no file except {path}.",
+             f"Request: {st['question']}",
+             "Requirements: " + "; ".join(f"R{i + 1}: {r}" for i, r in enumerate(st["requirements"])),
+             f"The changes: in {st['root']} run `git diff {st['base_head']} HEAD`" if st["git_top"]
+             else f"The changes are in {st['root']}.",
+             "Items:"]
+    lines += [f"- {it['id']} {it['title']}: {it['goal']}" for it in items]
+    lines += [f"Planned files left unchanged: {unchanged_note(items)}"] if unchanged_note(items) else []
+    lines += ["Check the diff against the requirements and goals: bugs, missing cases, broken or lost tests, "
+              "conflicts between items, and anything a goal asked for that is not there.",
+              f"Write one line per finding to {path}: `<high|medium|low> <file>:<line> <problem> -> <fix>`, "
+              "or `no findings`. Reply with the number of findings."]
+    brief = os.path.join(task.dir, "briefs", f"{rid}-review.md")
+    os.makedirs(os.path.dirname(brief), exist_ok=True)
+    with open(brief, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    st["runs"].append({"id": rid, "items": [], "status": "active", "kind": "review", "brief": brief,
+                       "worktree": None, "started_at": _now()})
+    st["review_state"] = "running"
+    task.event("review_started", rid)
+    return brief
+
+
+def task_checks(task, st, stem):
+    """Run the task checks on HEAD once per HEAD. Returns the failure (command, log) or None."""
+    if not st["check_cmd"]:
+        return None
+    now = head(st["git_top"]) if st["git_top"] else None
+    if now is not None and st.get("checked_head") == now:
+        return None
+    for command, code, log in run_checks(task, st["check_cmd"], st["root"], stem, st["check_timeout_s"]):
+        if code != 0:
+            return command, code, log
+    st["checked_head"] = now
+    return None
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_start(a):
+    root = os.path.realpath(a.root)
+    if not os.path.isdir(root):
+        raise Fail("bad_input", f"no folder {root}", 2)
+    plan = read_plan_file(a.plan)
+    top = git_top(root)
+    stamp = _dt.datetime.now().strftime("%Y%m%d")
+    slug = re.sub(r"[^a-z0-9]+", "-", str(plan.get("question") or "task").lower()).strip("-")[:40] or "task"
+    base = os.path.join(root, TASK_DIR, f"{stamp}-{slug}")
+    tdir, n = base, 1
+    while os.path.exists(tdir):
         n += 1
-        task_id = f"{stem}-{n}"
-    task_dir = os.path.join(base, task_id)
-    os.makedirs(task_dir)
-    task = Task(task_dir)
+        tdir = f"{base}-{n}"
+    st = {"schema_version": SCHEMA, "version": VERSION, "task_id": os.path.basename(tdir), "root": root,
+          "git_top": top, "statement": a.statement, "question": "", "requirements": [], "check_cmd": [],
+          "check_timeout_s": int(plan.get("check_timeout_s") or CHECK_TIMEOUT_S), "mode": a.mode,
+          "max_parallel": a.max_parallel, "review": a.review, "review_state": "none", "auto_fixes": 0,
+          "status": "active", "stop": None, "questions": [], "decisions": [], "items": [], "runs": [],
+          "base_head": head(top) if top else None, "started_at": _now(), "updated_at": None, "mark": None}
+    planned = sorted({f for raw in plan_items(plan) if isinstance(raw, dict)
+                      for f in (_norm_path(x) for x in _list(raw.get("files")))})
+    found = [f for f in planned if os.path.lexists(os.path.join(root, f))]
+    if planned and not found and not a.new_files:
+        raise Fail("files_not_found", f"none of the planned files exist under {root}: {', '.join(planned[:6])}", 1,
+                   "needs_fix", "give --root the folder the request changes (file paths start there); if every "
+                                "file really is new, rerun with --new-files")
+    for f in found:  # git sees nothing inside a repository nested below the root's own
+        inner = git_top(os.path.dirname(os.path.join(root, f.rstrip("/"))) or root)
+        if inner != top:
+            raise Fail("nested_repo", f"{f} is in another git repository, {inner}", 1, "needs_fix",
+                       f"rerun start with --root {inner} and file paths that start there")
+    if top:
+        dirty = dirty_files(top, root)
+        clash = sorted(p for p in dirty if covered(p, planned))
+        if clash:
+            raise Fail("dirty_files", f"planned files have uncommitted changes: {', '.join(clash)}", 1, "needs_user",
+                       "ask the user to commit or stash them, then rerun start")
+        st["start_dirty"] = dirty
+    os.makedirs(tdir)
+    task = Task(tdir)
     try:
-        task.lock()
-        st = {"schema_version": SCHEMA, "task_id": task_id, "statement": a.statement,
-              "governing_question": a.question, "mode": a.mode or "delegate", "mode_explicit": a.mode is not None,
-              "status": "active", "stop": None, "items": [], "questions": [], "decisions": [], **cfg,
-              "applied_seq": 0, "updated_at": None}
-        os.makedirs(os.path.join(task_dir, "results"))
-        with open(os.path.join(task_dir, ".gitignore"), "w", encoding="utf-8") as f:
-            f.write("*\n")  # the task folder never shows in git status; the user's .gitignore stays untouched
-        w = Writer(task, st, argv)
-        w.event("engaged")
-        w.commit()
-        task.unlock()
-    except BaseException:
-        shutil.rmtree(task_dir, ignore_errors=True)
+        out = apply_plan(st, plan, task)
+    except Fail:
+        shutil.rmtree(tdir, ignore_errors=True)
+        with _quiet():
+            os.rmdir(os.path.dirname(tdir))
         raise
-    return {"task_id": task_id, "task_dir": task_dir}
+    with open(os.path.join(root, TASK_DIR, ".gitignore"), "w", encoding="utf-8") as f:
+        f.write("*\n")  # task state, logs and worktrees stay out of the user's commits and stashes
+    task.save(st)
+    task.event("engaged", None, {"statement": a.statement, "version": VERSION})
+    task.event("plan_changed", None, out)
+    return {"task_dir": tdir, "plan": task.plan_path, **locked(task, lambda s: advance(task, s))}
 
 
-def cmd_resume(task, argv):
-    st = task.load()
-    lines, torn = task.record_lines()
-    out = {"applied": [], "undelivered": []}
-    if torn is not None:
-        with open(task.record_path, "rb") as f:
-            data = f.read()
-        body = data[:-1] if data.endswith(b"\n") else data
-        cut = body.rfind(b"\n") + 1
-        with open(task.record_path, "wb") as f:
-            f.write(data[:cut])
-    unapplied = [l for l in lines if l["seq"] > st.get("applied_seq", 0)]
-    if torn is not None and not unapplied:
-        out["torn_line"] = torn
-    groups, order = {}, []
-    for l in unapplied:
-        if l["cmd"] not in groups:
-            groups[l["cmd"]] = []
-            order.append(l["cmd"])
-        groups[l["cmd"]].append(l)
-    next_seq = (lines[-1]["seq"] + 1) if lines else 1
-    for cmd in order:
-        glines = groups[cmd]
-        first = glines[0]
-        if first.get("argv") is None:
-            out.setdefault("torn_lines_without_argv", []).append(cmd)
-            st["applied_seq"], st["updated_at"] = glines[-1]["seq"], glines[-1]["ts"]
-            continue
-        cargv = first["argv"]
-        args = build_parser().parse_args(cargv + ["--task", task.dir])
-        if cargv[0] == "brief":
-            out["undelivered"] += _csv(args.ids)
-            st["applied_seq"], st["updated_at"] = glines[-1]["seq"], glines[-1]["ts"]
-            continue
-        w = ReplayWriter(task, st, cargv, cmd, next_seq, glines)
-        COMMANDS[cargv[0]](task, st, args, w)
-        next_seq = w.seq
-        last = w.last or glines[-1]
-        st["applied_seq"], st["updated_at"] = last["seq"], last["ts"]
-        out["applied"].append({"cmd": cmd, "argv": cargv})
-    w = Writer(task, st, argv, next_seq=next_seq)
-    for i in out["undelivered"]:
-        w.event("item_held", i, {"reason": "brief not delivered"})
-    if st["status"] == "stopped":
-        st["status"], st["stop"] = "active", None
-    w.event("resumed", None, {"undelivered": out["undelivered"]})
-    w.commit()
-    res = {"status": st["status"], "stop": st["stop"], "applied": out["applied"], "undelivered": out["undelivered"]}
-    if "torn_line" in out:
-        res["torn_line"] = out["torn_line"]
-    return res
-
-
-class ReplayWriter(Writer):
-    """Re-runs an invocation, appending only the lines it would have written beyond the `skip` that survived."""
-
-    def __init__(self, task, st, argv, cmd, next_seq, lines):
-        super().__init__(task, st, argv, cmd=cmd, next_seq=next_seq, first_line_written=True)
-        self.lines = lines  # the invocation's surviving lines; verify re-applies its exit codes from them
-        self.skip = len(lines)
-        self.replay = True
-
-    def event(self, event, ref=None, data=None):
-        if self.skip > 0:
-            self.skip -= 1
-            return
-        super().event(event, ref, data)
-
-
-def cmd_status(st):
-    return {"governing_question": st["governing_question"], "status": st["status"], "stop": st["stop"],
-            "items": [{k: it.get(k) for k in ("id", "title", "kind", "status", "attempts", "briefs", "needs",
-                                              "depends_on", "skill", "writes", "worktree", "patch", "result",
-                                              "summary")} for it in st["items"]],
-            "answers": [{k: q[k] for k in ("id", "type", "text", "round", "answer", "answer_source", "changed_at")}
-                        for q in st["questions"]],
-            "decisions": [{k: d[k] for k in ("id", "chosen", "rejected")} for d in st["decisions"]]}
-
-
-def cmd_handoff(task, st):
+def advance(task, st):
+    """The next action for the coordinator; settles returned runs and starts new ones. Caller holds the lock."""
     t = shlex.quote(task.dir)
-    script = f"python3 {shlex.quote(os.path.abspath(__file__))}"
-    leaves = [it for it in st["items"] if it["kind"] == "leaf" and it["status"] != "dropped"]
-    done = sum(1 for l in leaves if l["status"] == "done")
-    lines, torn = task.record_lines()
-    out = [f"Governing question: {st['governing_question']}", f"Task status: {st['status']}",
-           f"Stop: {st['stop']['condition'] + ' - ' + st['stop']['detail'] if st['stop'] else 'none'}",
-           f"Items done: {done} of {len(leaves)}", "Settled answers:"]
-    for q in st["questions"]:
-        if q["answer"] is not None:
-            out.append(f"- {q['id']} ({q['type']}, {q['answer_source']}): {q['text']} -> {q['answer']}")
-    out.append("Decisions:")
-    for d in st["decisions"]:
-        out.append(f"- {d['id']} (item {d['item']}): {d['question']} -> {d['chosen']}")
-    failed = [l["id"] for l in leaves if l["status"] == "failed"]
-    out.append(f"Failed items: {', '.join(failed) or 'none'}")
+    nxt = cmd_line(task, "next")
+    if st["status"] == "complete":
+        return {"action": "report", "next": "write the report; mark after the user replies"}
     if st["status"] == "handed_back":
-        nxt = "none: the task was handed back; work normally"
-    elif torn is not None or any(l["seq"] > st.get("applied_seq", 0) for l in lines):
-        nxt = f"{script} resume --task {t}"
-    elif st["status"] == "stopped":
-        nxt = f"{script} resume --task {t}  (after the user answers, approves or asks to continue)"
-    else:
-        n = compute_next(st)
-        running = [l["id"] for l in leaves if l["status"] == "running"]
-        if n["expand"]:
-            nxt = f"{script} add --task {t} --parent {n['expand'][0]} ...  (or drop it)"
-        elif n["ready"]:
-            nxt = f"{script} brief {','.join(n['ready'][0])} --task {t}"
-        elif running:
-            nxt = f"wait for the replies of {', '.join(running)}, then {script} complete ..."
-        elif st["status"] == "complete":
-            nxt = f"{script} status --task {t}  (show the result; record the user's mark with mark)"
-        elif not st["items"]:
-            nxt = f"{script} add --task {t} --parent root ..."
+        return {"action": "none", "next": "the task was handed back; stop using this method"}
+    if st["status"] == "stopped":
+        return stop_action(task, st)
+    unasked = [q for q in st["questions"] if q["answer"] is None and not q["asked"] and q["origin"] == "plan"]
+    if unasked:
+        for q in unasked:
+            q["asked"] = True
+            task.event("question_asked", q["id"], {"type": q["type"], "round": 1})
+        task.save(st)
+        return {"action": "ask", "questions": [qview(q) for q in unasked],
+                "plan": [{"id": it["id"], "title": it["title"], "files": it["files"]}
+                         for it in st["items"] if it["status"] != "dropped"],
+                "next": "ask all of these in one question, each labelled with its type and default, with the plan in "
+                        f"the prompt; record each reply with {cmd_line(task, 'answer', '--id', '<Q>', '--text', shlex.quote('<reply>'))} "
+                        f"(or `answer --defaults` when the user accepts them), then {nxt}"}
+    unanswered = [q["id"] for q in st["questions"] if q["answer"] is None and q["origin"] == "plan"]
+    if unanswered:
+        raise Fail("open_questions", f"{', '.join(unanswered)} have no answer yet", 1, "needs_user",
+                   f"record the user's replies with `answer`, or `answer --defaults`, then {nxt}")
+    review_run = next((r for r in st["runs"] if r["status"] == "active" and r["kind"] == "review"), None)
+    closed, stop = settle_runs(task, st)
+    if stop:
+        return do_stop(task, st, stop["condition"], stop["detail"])
+    out = {}
+    if review_run:
+        path = os.path.join(task.dir, "review.md")
+        if os.path.isfile(path):
+            st["review_state"] = "done"
+            task.event("review_done", review_run["id"])
+            out["review"] = path
         else:
-            nxt = f"{script} finish --task {t}"
-    out.append(f"Next command: {nxt}")
-    return "\n".join(out)
+            st["review_state"] = "none" if st.get("review_tries", 0) < 1 else "missing"
+            st["review_tries"] = st.get("review_tries", 0) + 1
+    round_items = [items_by_id(st)[i] for r in closed for i in r["items"]]
+    if unchanged_note(round_items):
+        out["unchanged"] = unchanged_note(round_items)
+    landed = [it["id"] for it in round_items if it["status"] == "done"]
+    # a round with items going back for another try is checked after that try, so no fix item duplicates them
+    if round_items and all(it["status"] in ("done", "failed") for it in round_items) \
+            and any(it["status"] == "done" and it["files"] for it in st["items"]):
+        failed = task_checks(task, st, f"task-{len(st['runs'])}")
+        if failed:
+            command, code, log = failed
+            if st["auto_fixes"] >= AUTO_FIXES:
+                return do_stop(task, st, "task_checks_failed", f"`{command}` still fails after {AUTO_FIXES} fix "
+                                                               f"items; log {log}")
+            st["auto_fixes"] += 1
+            files = sorted({f for i in landed for f in items_by_id(st)[i]["files"]})
+            fix = {"id": str(max(int(i["id"]) for i in st["items"]) + 1),
+                   "title": f"Fix the task checks ({st['auto_fixes']})",
+                   "goal": f"The task check `{command}` exits {code} after items "
+                           f"{', '.join(landed)} landed. Make it pass without undoing "
+                           f"what those items added. Log tail:\n{tail(log, 15)}",
+                   "covers": [], "files": files, "check_cmd": list(st["check_cmd"]), "check": [], "needs": [],
+                   "depends": [], "skill": None, "status": "pending", "tries": 0, "notes": [], "commit": None,
+                   "result": None, "block": None, "run": None, "failure": None, "origin": "task_checks"}
+            st["items"].append(fix)
+            task.event("fix_added", fix["id"], {"command": command, "log": log})
+            write_plan_file(task, st)
+    groups = plan_runs(st)
+    if groups:
+        runs = start_runs(task, st, groups)
+        task.save(st)
+        if runs[0]["self"]:
+            return {**out, "action": "do_yourself", "items": runs[0]["items"], "brief": runs[0]["brief"],
+                    "next": f"read the brief and do its items yourself, then {nxt}"}
+        return {**out, "action": "dispatch",
+                "runs": [{"run": r["id"], "items": r["items"], "prompt": prompt_for(r["brief"])} for r in runs],
+                "next": f"start exactly {len(runs)} executor(s), one per prompt, in the foreground and all at once; "
+                        "pass each prompt unchanged (it is one executor's whole job, never shared or split); "
+                        f"when every one has replied, {nxt}"}
+    blocked = [it for it in st["items"] if it["status"] == "blocked"]
+    live_needs = {q for it in st["items"] if it["status"] in ("pending", "blocked") for q in it["needs"]}
+    waiting = [q for q in st["questions"] if q["answer"] is None and q["id"] in live_needs]
+    if blocked or waiting:
+        return do_stop(task, st, "needs_user", "; ".join(
+            [f"{q['id']}: {q['text']}" for q in waiting]
+            + [f"item {it['id']} asks approval: {it['block']['text']}" for it in blocked
+               if it["block"]["kind"] == "approval"]))
+    for it in st["items"]:  # nothing can start: what is left waits on failed work
+        if it["status"] == "pending":
+            fail_item(task, st, it, "it waits on work that cannot finish")
+    if review_due(st):
+        brief = start_review(task, st)
+        task.save(st)
+        return {**out, "action": "review", "prompt": prompt_for(brief),
+                "next": "tell the user now that the work has landed and its checks pass, with a review still to "
+                        f"come; then start one read-only executor with the prompt, in the foreground; when it "
+                        f"replies, {nxt}"}
+    task.save(st)
+    if "review" in out:
+        return {**out, "action": "finish",
+                "next": f"read the review; for each finding to fix, add an item to {task.plan_path}, run "
+                        f"{cmd_line(task, 'plan')}, then {nxt}; keep the rest as named gaps; with nothing to fix, "
+                        f"{cmd_line(task, 'finish')}"}
+    return {"action": "report", **out, **finish_now(task, st)}
 
 
-def cmd_changes(task, st, a):
-    it = require_item(st, a.id)
-    if not (it.get("writes") and it["status"] == "running"):
-        raise Fail("not_running", f"{a.id} is not a running --writes item", 2, "needs_fix",
-                   "decompose.py status --task <task>")
-    top = git_top(task, a.id)
-    files = changed_files(top, *step_span(task, st, top, it))
-    shown = [l for l in task.record_lines()[0] if l["event"] == "plan_shown"]
-    paths = next((e["paths"] for e in (shown[-1]["data"]["writes"] if shown else []) if e["id"] == a.id), [])
-    return {"id": a.id, "edits": "worktree" if it.get("worktree") else "in_place", "files": files,
-            "unlisted": [f["path"] for f in files if not covered(f["path"], paths)]}
+def qview(q):
+    return {k: q.get(k) for k in ("id", "type", "text", "default", "because")}
 
 
-def covered(path, paths):
-    return any(path == p or (p.endswith("/") and path.startswith(p)) for p in paths)
-
-
-def work_dir(task, rel):
-    """The folder an item works in: the workspace root, or the same folder inside worktree `rel`."""
-    root = workspace_root(task)
-    if not rel:
-        return root
-    sub = os.path.relpath(os.path.realpath(root), os.path.realpath(git_top(task, "with a worktree")))
-    return os.path.normpath(os.path.join(task.dir, rel, sub))
-
-
-def run_verify(task, a):
-    """API-5 verify: run the item's command entries in its working tree, then record the exit codes."""
-    st = task.load()
-    it = require_item(st, a.id)
-    if it["status"] != "running":
-        raise Fail("not_running", f"{a.id} is {it['status']}", 2, "needs_fix", "decompose.py status --task <task>")
-    if not it.get("check_commands"):
-        raise Fail("no_check_commands", f"{a.id} has no command entry; judge its checklist instead", 2)
-    attempt, check_wt, top = it["briefs"], None, None
-    if it.get("writes") and len(chain_of(st, a.id)) > 1:
-        top = git_top(task, a.id)
-        if not ref_exists(top, end_ref(st, it)):
-            raise Fail("step_not_finished", f"chain step {a.id} has no {end_ref(st, it)} ref, so it did not "
-                       "finish", 2, "needs_fix", "record the step as API-14 says")
-        check_wt = os.path.join("wt", f"{a.id}-check")
-        remove_worktree(top, os.path.join(task.dir, check_wt))
-        _git(top, "worktree", "add", "--detach", os.path.join(task.dir, check_wt), end_ref(st, it))
-    try:
-        cwd = work_dir(task, check_wt or it.get("worktree"))
-        checks = []
-        for n, c in enumerate(it["check_commands"], 1):
-            log = f"results/{a.id}-{attempt}-check-{n}.log"
-            checks.append({"command": c, "exit_code": run_check(c, cwd, os.path.join(task.dir, log),
-                                                                 st["check_timeout_s"]), "log": log})
-    finally:
-        if check_wt:
-            remove_worktree(top, os.path.join(task.dir, check_wt))
-    a.checks = checks
-    return checks
-
-
-def cmd_verify(task, st, a, w):
-    it = require_item(st, a.id)
-    checks = w.lines[0]["data"]["checks"] if w.replay else a.checks
-    attempt = w.lines[0]["data"]["attempt"] if w.replay else it["briefs"]
-    if not w.replay and (it["status"] != "running" or it["briefs"] != a.attempt_seen):
-        raise Fail("not_running", f"{a.id} changed while its commands ran; nothing was recorded", 2, "needs_fix",
-                   "decompose.py status --task <task>")
-    it["check_runs"] = [{"command": c["command"], "exit_code": c["exit_code"]} for c in checks]
-    w.event("checks_run", a.id, {"attempt": attempt, "checks": checks})
-    return {"id": a.id, "attempt": attempt, "checks": checks, "passed": all(c["exit_code"] == 0 for c in checks)}
-
-
-COMMANDS["verify"] = cmd_verify
-
-
-def cmd_checkpoint(task, st, a):
-    """API-15: the chain executor marks the end of a step; writes only the step's -end ref."""
-    it = require_item(st, a.id)
-    if not (it.get("writes") and it["status"] == "running" and len(chain_of(st, a.id)) > 1):
-        raise Fail("not_running", f"{a.id} is not a running writes step of a chain", 2, "needs_fix",
-                   "decompose.py status --task <task>")
-    top = git_top(task, a.id)
-    base = start_ref(st, it)
-    cwd = os.path.join(task.dir, it["worktree"]) if it.get("worktree") else top
-    env = dict(os.environ, GIT_AUTHOR_NAME="atomic-decompose", GIT_AUTHOR_EMAIL="atomic-decompose@localhost",
-               GIT_COMMITTER_NAME="atomic-decompose", GIT_COMMITTER_EMAIL="atomic-decompose@localhost")
-    sha = _git(top, "commit-tree", snapshot(cwd, base), "-p", base, "-m", f"atomic-decompose step end {a.id}",
-               env=env).stdout.strip()
-    _git(top, "update-ref", end_ref(st, it), sha)
-    return {"id": a.id, "ref": end_ref(st, it)}
-
-
-def cmd_validate(st):
-    problems = []
-    by = items_by_id(st)
-
-    def p(code, ref, msg):
-        problems.append({"code": code, "ref": ref, "message": msg})
-
-    qids = {q["id"] for q in st["questions"]}
-    titles = {}
-    for it in st["items"]:
-        if it["status"] == "dropped":
-            continue
-        if it["title"] in titles:
-            p("duplicate_title", it["id"], f"same title as {titles[it['title']]}")
-        titles.setdefault(it["title"], it["id"])
-        for q in it["needs"]:
-            if q not in qids:
-                p("unknown_ref", it["id"], f"needs unknown question {q}")
-        for d in it["depends_on"]:
-            if d not in by:
-                p("unknown_ref", it["id"], f"depends on unknown item {d}")
-            elif by[d]["status"] == "dropped" and it["status"] == "pending":
-                p("dangling_dependency", it["id"], f"depends on dropped item {d}")
-        if it["kind"] == "leaf":
-            for f, code in (("goal", "leaf_without_goal"), ("returns", "leaf_without_returns")):
-                if not it.get(f):
-                    p(code, it["id"], f"leaf has no {f}")
-            if not it.get("checklist") and not it.get("check_commands"):
-                p("leaf_without_checklist", it["id"], "leaf has no checklist or command entry")
-        elif not children(st, it["id"]):
-            d = discoverer(st, it["id"])
-            if not (d and d["status"] in ("pending", "running", "done")):
-                p("childless_group", it["id"], "group has no live children")
-    color = {}
-
-    def visit(i):
-        color[i] = 1
-        # a group stands for its leaves, so a leaf depending on its own ancestor closes a cycle
-        edges = by[i]["depends_on"] + ([c["id"] for c in children(st, i)] if by[i]["kind"] == "group" else [])
-        for d in edges:
-            if d not in by or by[d]["status"] == "dropped":
-                continue
-            if color.get(d) == 1:
-                p("cycle", i, f"dependency cycle through {d}")
-            elif color.get(d) is None:
-                visit(d)
-        color[i] = 2
-
-    for it in st["items"]:
-        if it["status"] != "dropped" and color.get(it["id"]) is None:
-            visit(it["id"])
+def do_stop(task, st, condition, detail):
+    st["status"], st["stop"] = "stopped", {"condition": condition, "detail": detail, "at": _now()}
     for q in st["questions"]:
-        if q["round"] == 1 and q["answer"] is None:
-            p("open_question", q["id"], "round-1 question has no answer")
-    return {"ok": not problems, "problems": problems}
+        if q["answer"] is None and not q["asked"]:
+            q["asked"] = True
+            task.event("question_asked", q["id"], {"type": q["type"], "round": 2})
+    task.event("stopped", None, {"condition": condition, "detail": detail})
+    task.save(st)
+    return stop_action(task, st)
 
 
-# ---------------------------------------------------------------- CLI
+def stop_action(task, st):
+    stop = st["stop"]
+    approvals = [it["id"] for it in st["items"] if it["status"] == "blocked" and it["block"]["kind"] == "approval"]
+    how = [f"record answers with {cmd_line(task, 'answer', '--id', '<Q>', '--text', shlex.quote('<reply>'))}"]
+    if approvals:
+        how.append(f"then {cmd_line(task, 'resume', '--approve', '<ids>', '--deny', '<ids>')} as the user said")
+    else:
+        how.append(f"then {cmd_line(task, 'resume')}")
+    return {"action": "stop", "condition": stop["condition"], "detail": stop["detail"],
+            "questions": [qview(q) for q in st["questions"] if q["answer"] is None], "approvals": approvals,
+            "next": "tell the user what the stop needs, all in one message, and wait for the reply; never approve "
+                    "a step yourself. After the reply: " + ", ".join(how)}
+
+
+def cmd_next(task, a):
+    return locked(task, lambda st: advance(task, st))
+
+
+def cmd_plan(task, a):
+    plan = read_plan_file(a.file or task.plan_path)
+
+    def go(st):
+        if st["status"] == "complete":
+            raise Fail("task_complete", "the task is complete; `mark --mark reworked` reopens it", 1)
+        out = apply_plan(st, plan, task)
+        task.event("plan_changed", None, out)
+        task.save(st)
+        return {**out, "next": cmd_line(task, "next")}
+    return locked(task, go)
+
+
+def cmd_answer(task, a):
+    def go(st):
+        qs = {q["id"]: q for q in st["questions"]}
+        if a.defaults:
+            todo = [(q, q["default"], "default_accepted") for q in st["questions"]
+                    if q["answer"] is None and q["default"]]
+        else:
+            if a.id not in qs:
+                raise Fail("bad_input", f"no question {a.id}; questions are {', '.join(qs) or 'none'}", 2)
+            if a.text is None:
+                raise Fail("bad_input", "give --text, or --defaults", 2)
+            todo = [(qs[a.id], a.text, a.source)]
+        out = []
+        for q, text, source in todo:
+            changed = q["answer"] is not None and q["answer"] != text
+            affected = [it["id"] for it in st["items"] if q["id"] in it["needs"] and it["status"] == "done"]
+            q.update(answer=text, answer_source=source)
+            if changed:
+                q["changed_at"] = _now()
+                q["affected"] = sorted(set(q["affected"]) | set(affected), key=int)
+            for it in st["items"]:
+                if it["status"] == "blocked" and it["block"].get("question") == q["id"]:
+                    it.update(status="pending", block=None)
+            task.event("answered", q["id"], {"source": source, "changed": changed})
+            out.append({"id": q["id"], "answer": text, "source": source, **({"affected": affected} if changed else {})})
+        task.save(st)
+        return {"answered": out, "next": cmd_line(task, "resume") if st["status"] == "stopped"
+                else cmd_line(task, "next")}
+    return locked(task, go)
+
+
+def cmd_done(task, a):
+    st = task.load()
+    it = items_by_id(st).get(a.id)
+    if it is None:
+        raise Fail("bad_input", f"no item {a.id}", 2)
+    if it["status"] == "done":
+        return {"id": it["id"], "status": "done", "commit": it["commit"], "next": next_in_run(task, st, it)}
+    if it["status"] != "running":
+        why = f" ({it['failure']})" if it["failure"] else ""
+        raise Fail("not_running", f"item {a.id} is {it['status']}{why}, so it is not yours to finish now", 1,
+                   "needs_fix", "skip it: " + next_in_run(task, st, it))
+    run = next(r for r in st["runs"] if r["id"] == it["run"])
+    first = next(i for i in run["items"] if items_by_id(st)[i]["status"] == "running")
+    if first != it["id"]:  # two executors on one brief would commit each other's half-made edits
+        raise Fail("out_of_order", f"item {first} comes before item {a.id} in this brief", 1, "needs_fix",
+                   f"one executor does a brief's items in order: do item {first} first. If you were told to do "
+                   "only part of the brief, change nothing and reply `this brief was given to several executors`")
+    top = git_top(run["dir"]) if st["git_top"] else None
+    mine, stray = [], []
+    if top:
+        # ponytail: new untracked files outside the item (build and test output, mostly) are left alone and
+        # named, not refused; a source file created outside the plan shows in that list, uncommitted
+        changed = changed_since(run["dir"], top, run["snapshot"])
+        others = [f for o in st["items"] if o["status"] == "running" and o["run"] != run["id"]
+                  and next(r for r in st["runs"] if r["id"] == o["run"])["dir"] == run["dir"] for f in o["files"]]
+        outside = [p for p, h in changed.items() if not covered(p, it["files"]) and not untracked(h)
+                   and not (not it["files"] and covered(p, others))]
+        stray = [p for p, h in changed.items() if not covered(p, it["files"]) and untracked(h)
+                 and p not in run.get("links", [])]
+        if outside:
+            if not it["files"]:
+                raise Fail("outside_files", f"item {a.id} is read-only, but these changed: {', '.join(outside)}",
+                           1, "needs_fix", "undo those changes; write only the result file")
+            raise Fail("outside_files", f"item {a.id} may change only {', '.join(it['files'])}; also changed: "
+                       f"{', '.join(outside)}", 1, "needs_fix",
+                       "undo those changes (an item later in your run does its own files), or ask with "
+                       f"{cmd_line(task, 'block', a.id, '--approval', shlex.quote('change <file>: <why>'))}")
+        mine = [p for p in changed if covered(p, it["files"])] if it["files"] else []
+        if it["files"] and not mine and not a.no_change:
+            sha = landed_commit(run["dir"], st, it)
+            if sha:
+                return finish_item(task, it["id"], sha, None)
+            raise Fail("no_changes", f"item {a.id}'s files are unchanged under {run['dir']}", 1, "needs_fix",
+                       f"do the goal; if it truly needs no change, rerun with --no-change \"<why>\"")
+    if not it["files"]:
+        rp = a.result or result_path(task, it)
+        if not os.path.isfile(rp) or not os.path.getsize(rp):
+            raise Fail("no_result", f"item {a.id} has no result at {rp}", 1, "needs_fix",
+                       f"write the result to {rp}, then run done again")
+    attempt = it["tries"] + 1
+    results = run_checks(task, it["check_cmd"], run["dir"], f"{it['id']}-{attempt}", st["check_timeout_s"])
+    bad = next(((c, code, log) for c, code, log in results if code != 0), None)
+    if bad:
+        command, code, log = bad
+        why = check_unrunnable(command, code, tail(log, 200)) if code is not None else None
+        if why:
+            raise Fail("check_broken", f"`{command}` could not run: {why}. This does not count as a try.\n"
+                       f"{tail(log, 10)}", 1, "needs_fix",
+                       f"if the command itself is wrong, {cmd_line(task, 'block', a.id, '--question', shlex.quote('the check `<cmd>` is wrong: <why>'))}")
+        return fail_try(task, a.id, command, code, log, run, mine)
+    sha = None
+    if it["files"] and top and mine:
+        sha = commit_item(run["dir"], st, it, mine)
+    out = finish_item(task, it["id"], sha, a.result and os.path.abspath(a.result),
+                      [f for f in it["files"] if top and not any(covered(p, [f]) for p in mine)])
+    if stray:
+        out["not_committed"] = stray[:20]
+    return out
+
+
+def fail_try(task, item_id, command, code, log, run, mine):
+    def go(st):
+        it = items_by_id(st)[item_id]
+        it["tries"] += 1
+        what = "timed out" if code is None else f"exited {code}"
+        if it["tries"] < TRIES:
+            task.event("item_retried", item_id, {"reason": f"`{command}` {what}", "log": log})
+            task.save(st)
+            return None
+        kept = shelve(task, run, mine, f"{item_id}.patch")
+        fail_item(task, st, it, f"`{command}` {what} on all {TRIES} tries; log {log}"
+                  + (f"; its last diff {kept}" if kept else ""))
+        task.save(st)
+        return it
+    failed = locked(task, go)
+    st = task.load()
+    if failed is None:
+        it = items_by_id(st)[item_id]
+        raise Fail("check_failed", f"`{command}` {'timed out' if code is None else f'exited {code}'} "
+                   f"(try {it['tries']} of {TRIES}). Log {log}, last lines:\n{tail(log)}", 1, "needs_fix",
+                   f"fix the work, then {cmd_line(task, 'done', item_id)}")
+    raise Fail("item_failed", f"item {item_id} failed {TRIES} tries; its files are back as they were", 1,
+               "needs_fix", next_in_run(task, st, failed))
+
+
+def shelve(task, run, paths, name):
+    """Save the diff of `paths` to patches/<name> and put the files back as at HEAD. Returns a phrase for a
+    note, or None when there was nothing to save. Files stay as they are when the patch cannot be written."""
+    if not paths or not git_top(run["dir"]):
+        return None
+    patch = os.path.join(task.dir, "patches", name)
+    try:
+        save_patch(run["dir"], paths, patch)
+    except (Fail, OSError) as e:
+        return f"could not be saved ({e}), so its files are left as they were"
+    restore_paths(run["dir"], paths)
+    return f"is saved at {patch} (`git apply` it to reuse it)"
+
+
+def landed_commit(run_dir, st, it):
+    """The commit an earlier `done` made for this item, when the state write after it was lost."""
+    return item_commits(run_dir, st).get(it["id"])
+
+
+def commit_item(run_dir, st, it, paths):
+    add_paths(run_dir, paths)
+    msg = ["-m", it["title"], "-m", f"{it['goal'][:600]}", "-m", f"AD-Item: {st['task_id']}/{it['id']}"]
+    p = git(run_dir, "commit", "-q", *msg, "--", *paths, check=False)
+    if p.returncode != 0:
+        raise Fail("commit_failed", f"git commit failed (a hook or the git identity): "
+                   f"{(p.stderr or p.stdout).strip()[-800:]}", 1, "needs_fix",
+                   "fix what the message names (a failing hook is part of the work), then run done again")
+    return head(run_dir)
+
+
+def finish_item(task, item_id, sha, result, untouched=()):
+    def go(st):
+        it = items_by_id(st)[item_id]
+        it.update(status="done", commit=sha, block=None, untouched=list(untouched))
+        if result:
+            it["result"] = result
+        task.event("item_done", item_id, {"commit": sha, "tries": it["tries"] + 1})
+        task.save(st)
+        return {"id": item_id, "status": "done", "commit": sha, "next": next_in_run(task, st, it)}
+    return locked(task, go)
+
+
+def next_in_run(task, st, it):
+    run = next((r for r in st["runs"] if r["id"] == it.get("run")), None)
+    if run is None:
+        return "go on with your brief"
+    by = items_by_id(st)
+    left = [i for i in run["items"] if by[i]["status"] == "running"]
+    if left:
+        return f"next item: {left[0]} {by[left[0]]['title']}"
+    if run.get("self"):
+        return f"every item in the brief is finished: run {cmd_line(task, 'next')}"
+    return "every item in your brief is finished: reply with one line per item"
+
+
+def cmd_block(task, a):
+    if bool(a.question) == bool(a.approval):
+        raise Fail("bad_input", "give exactly one of --question or --approval", 2)
+
+    def go(st):
+        it = items_by_id(st).get(a.id)
+        if it is None or it["status"] != "running":
+            raise Fail("not_running", f"item {a.id} is not running", 1)
+        block = {"kind": "question" if a.question else "approval", "text": a.question or a.approval}
+        if a.question:
+            q = {"id": f"Q{len(st['questions']) + 1}", "type": "user_only", "text": a.question,
+                 "default": a.default or "", "because": f"asked by item {a.id}", "asked": False, "answer": None,
+                 "answer_source": None, "changed_at": None, "affected": [], "origin": "block"}
+            st["questions"].append(q)
+            it["needs"].append(q["id"])
+            block["question"] = q["id"]
+        run = next(r for r in st["runs"] if r["id"] == it["run"])
+        top = git_top(run["dir"]) if st["git_top"] and it["files"] else None
+        mine = [p for p in changed_since(run["dir"], top, run["snapshot"]) if covered(p, it["files"])] if top else []
+        kept = shelve(task, run, mine, f"{a.id}-blocked.patch")
+        if kept:
+            it["notes"].append(f"Work from before the block {kept}")
+        it.update(status="blocked", block=block)
+        task.event("item_blocked", a.id, block)
+        task.save(st)
+        return {"id": a.id, "status": "blocked", "next": next_in_run(task, st, it)}
+    return locked(task, go)
+
+
+def cmd_decide(task, a):
+    def go(st):
+        rejected = []
+        for r in a.reject:
+            opt, sep, why = r.partition("::")
+            if not sep or not opt.strip() or not why.strip():
+                raise Fail("bad_input", f"--reject {r!r}: write \"<option>::<why it lost>\"", 2)
+            rejected.append({"option": opt.strip(), "why": why.strip()})
+        if not (a.criteria or a.because):
+            raise Fail("bad_input", "give --criteria <Q-ids> or --because \"<evidence>\"", 2)
+        d = {"id": f"D{len(st['decisions']) + 1}", "question": a.question, "chosen": a.chosen, "rejected": rejected,
+             "criteria": _csv(a.criteria), "because": a.because, "supersedes": a.supersedes, "superseded_by": None}
+        if a.supersedes:
+            old = next((x for x in st["decisions"] if x["id"] == a.supersedes), None)
+            if old is None:
+                raise Fail("bad_input", f"no decision {a.supersedes}", 2)
+            old["superseded_by"] = d["id"]
+        st["decisions"].append(d)
+        task.event("decided", d["id"], {"chosen": a.chosen})
+        task.save(st)
+        return {"id": d["id"]}
+    return locked(task, go)
+
+
+def cmd_status(task, a):
+    st = task.load()
+    active = [r for r in st["runs"] if r["status"] == "active"]
+    if st["status"] == "stopped":
+        nxt = "tell the user what the stop needs; after the reply: answer, then " + cmd_line(task, "resume")
+    elif st["status"] == "complete":
+        nxt = "report the result; mark after the user replies"
+    elif st["status"] == "handed_back":
+        nxt = "none: the task was handed back"
+    else:
+        nxt = cmd_line(task, "next") + (" (once every executor of the active runs has replied; after a new session "
+                                        "or compaction run it now: it restarts their unfinished items)"
+                                        if active else "")
+    return {"question": st["question"], "status": st["status"], "stop": st["stop"],
+            "requirements": [f"R{i + 1}: {r}" for i, r in enumerate(st["requirements"])],
+            "items": [{k: it.get(k) for k in ("id", "title", "status", "files", "tries", "commit", "result", "block",
+                                              "failure", "skill")} for it in st["items"]],
+            "answers": [{**qview(q), "answer": q["answer"], "source": q["answer_source"], "affected": q["affected"]}
+                        for q in st["questions"]],
+            "decisions": st["decisions"], "active_runs": [{"run": r["id"], "items": r["items"], "brief": r["brief"]}
+                                                          for r in active],
+            "plan": task.plan_path, "next": nxt}
+
+
+def cmd_resume(task, a):
+    def go(st):
+        if st["status"] == "handed_back":
+            return {"status": "handed_back", "next": "none: stop using this method on this task"}
+        by = items_by_id(st)
+        for ids, ok in ((_csv(a.approve), True), (_csv(a.deny), False)):
+            for i in ids:
+                it = by.get(i)
+                if it is None or it["status"] != "blocked" or it["block"]["kind"] != "approval":
+                    raise Fail("bad_input", f"item {i} is not waiting for an approval", 2)
+                text = it["block"]["text"]
+                it["notes"].append(f"The user approved: {text}" if ok else
+                                   f"The user refused: {text}. Reach the goal without it.")
+                it.update(status="pending", block=None)
+                task.event("approval", i, {"approved": ok, "step": text})
+        was = st["stop"]
+        st["status"], st["stop"] = "active", None
+        task.event("resumed", None, {"stop": was, "new_session": a.new_session})
+        task.save(st)
+        return {"status": "active", "was": was, "next": cmd_line(task, "next")}
+    return locked(task, go)
+
+
+def cmd_stop(task, a):
+    def go(st):
+        do_stop(task, st, a.condition, a.detail)
+        return {"status": "stopped", "next": "tell the user why; continue only after their reply, with resume"}
+    return locked(task, go)
+
+
+def cmd_finish(task, a):
+    return locked(task, lambda st: finish_now(task, st))
+
+
+def finish_now(task, st):
+    if st["status"] == "stopped":
+        raise Fail("task_stopped", f"the task is stopped ({st['stop']['condition']})", 1, "needs_user",
+                   stop_action(task, st)["next"])
+    if st["status"] == "complete":
+        return summary(task, st)
+    busy = [it["id"] for it in st["items"] if it["status"] in ("pending", "running", "blocked")]
+    if busy or any(r["status"] == "active" for r in st["runs"]):
+        raise Fail("not_finished", f"items {', '.join(busy) or 'in active runs'} are not finished", 1,
+                   "needs_fix", cmd_line(task, "next"))
+    if review_due(st):
+        raise Fail("review_needed", "the work needs its review first", 1, "needs_fix", cmd_line(task, "next"))
+    if st["git_top"]:
+        now, before = dirty_files(st["git_top"], st["root"]), st.get("start_dirty", {})
+        left = sorted(p for p, h in now.items() if before.get(p) != h and not untracked(h))
+        st["untracked_left"] = sorted(p for p, h in now.items() if before.get(p) != h and untracked(h))[:50]
+        if left:
+            raise Fail("uncommitted_changes", f"files changed during the task are not committed: "
+                       f"{', '.join(left)}", 1, "needs_fix",
+                       "a change belongs to an item: add an item for it to the plan (plan, next), or, if it is "
+                       "stray, ask the user before undoing it")
+    failed = task_checks(task, st, "finish") if any(it["status"] == "done" and it["files"]
+                                                    for it in st["items"]) else None
+    if failed:
+        command, code, log = failed
+        raise Fail("checks_failed", f"task check `{command}` exits {code}; log {log}:\n{tail(log, 15)}", 1,
+                   "needs_fix", f"add a fix item to {task.plan_path}, run plan, then next")
+    if st["git_top"]:
+        for r in st["runs"]:
+            if r.get("worktree") and os.path.isdir(r["worktree"]):
+                git(st["git_top"], "worktree", "remove", "--force", r["worktree"], check=False)
+                git(st["git_top"], "branch", "-D", r["branch"], check=False)
+    st["status"] = "complete"
+    st["finished_at"] = _now()
+    task.event("stopped", None, {"condition": "complete"})
+    task.save(st)
+    return summary(task, st)
+
+
+def summary(task, st):
+    rec = task.record()
+    items = [it for it in st["items"] if it["status"] != "dropped"]
+    tokens = [l["data"] for l in rec if l["event"] == "tokens"]
+    end = st.get("finished_at") or _now()
+    return {"question": st["question"], "status": st["status"],
+            "items": [{k: it[k] for k in ("id", "title", "status", "commit", "result", "skill")} for it in items],
+            "failed": [{"id": it["id"], "title": it["title"], "why": it["failure"]}
+                       for it in items if it["status"] == "failed"],
+            "decisions": st["decisions"],
+            "unconfirmed_defaults": [qview(q) for q in st["questions"] if q["answer_source"] == "default_unconfirmed"],
+            "changed_answers": [{"id": q["id"], "affected": q["affected"]} for q in st["questions"] if q["changed_at"]],
+            "review": os.path.join(task.dir, "review.md") if st["review_state"] == "done" else None,
+            "untracked_left": st.get("untracked_left", []),
+            "cost": {"wall_s": round((_ts(end) - _ts(st["started_at"])).total_seconds()),
+                     "runs": len([r for r in st["runs"] if r["kind"] == "work"]),
+                     "parallel_runs": len([r for r in st["runs"] if r.get("worktree")]),
+                     "tries": sum(it["tries"] + (it["status"] == "done") for it in items),
+                     "done": sum(it["status"] == "done" for it in items),
+                     "failed": sum(it["status"] == "failed" for it in items),
+                     "tokens": tokens[-1] if tokens else None},
+            "next": "write the report (answer first); mark after the user replies"}
+
+
+def cmd_mark(task, a):
+    def go(st):
+        if st["status"] != "complete":
+            raise Fail("not_complete", "mark a task after finish", 1, "needs_fix", cmd_line(task, "finish"))
+        if a.mark == "reworked" and not a.reason:
+            raise Fail("bad_input", "a reworked mark needs --reason", 2)
+        st["mark"] = {"mark": a.mark, "reason": a.reason}
+        if a.mark == "reworked":
+            st["status"], st["review_state"] = "active", "none"
+        task.event("marked", None, {"mark": a.mark, "reason": a.reason})
+        task.save(st)
+        return {"mark": a.mark, "next": (f"edit {task.plan_path} for the rework, run plan, then next"
+                                         if a.mark == "reworked" else "nothing more")}
+    return locked(task, go)
+
+
+def cmd_log(task, a):
+    def go(st):
+        data = json.loads(a.data) if a.data else {}
+        if a.event == "wrong_engagement":
+            st["status"] = "handed_back"
+        task.event(a.event, a.ref, data)
+        task.save(st)
+        return {"logged": a.event, "next": "carry on as normal work, without this method"
+                if a.event == "wrong_engagement" else cmd_line(task, "status")}
+    try:
+        return locked(task, go)
+    except ValueError as e:
+        raise Fail("bad_input", f"--data is not JSON: {e}", 2)
+
+
+# ---------------------------------------------------------------- entry
 
 def build_parser():
-    ap = Parser(prog="decompose.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="command", required=True, parser_class=Parser)
+    p = Parser(prog="decompose.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="command", required=True, parser_class=Parser)
 
-    def cmd(name, help_text):
-        sp = sub.add_parser(name, help=help_text, description=help_text)
-        if name != "init":
-            sp.add_argument("--task", required=True, help="task folder <workspace>/.atomic-decompose/<task-id>")
-        return sp
+    def cmd(name, help_text, task=True):
+        s = sub.add_parser(name, help=help_text, description=help_text)
+        if task:
+            s.add_argument("--task", required=True, help="the task folder start printed")
+        return s
 
-    sp = cmd("init", "Create a task folder and state; prints {task_id, task_dir}.")
-    sp.add_argument("--root", required=True, help="workspace root")
-    sp.add_argument("--statement", required=True)
-    sp.add_argument("--question", required=True, help="governing question")
-    sp.add_argument("--mode", choices=["delegate", "main_session"],
-                    help="default delegate; an explicit --mode delegate also turns off the one-entry rule (DD-9)")
-    sp.add_argument("--profile")
-    sp = cmd("stop", "Stop the task with a stop condition.")
-    sp.add_argument("--condition", required=True,
-                    choices=["blocked_on_user", "needs_approval", "fault", "user_stop", "complete"])
-    sp.add_argument("--detail", required=True)
-    cmd("resume", "Repair the record, re-apply unapplied invocations and move a stopped task to active.")
-    cmd("finish", "Rerun done writes items' command entries, then mark the task complete (every leaf done or "
-                  "failed) and remove its refs and worktrees.")
-    sp = cmd("mark", "Record the user's mark of the result.")
-    sp.add_argument("--mark", required=True, choices=["accepted", "reworked"])
-    sp.add_argument("--reason")
-    sp = cmd("log", "Append a run-record event.")
-    sp.add_argument("event", choices=LOG_EVENTS)
-    sp.add_argument("--ref")
-    sp.add_argument("--data", help="JSON object")
-    sp = cmd("add", "Add a work item; prints {id}.")
-    sp.add_argument("--parent", required=True, help="parent item id or root")
-    sp.add_argument("--title", required=True)
-    sp.add_argument("--kind", required=True, choices=["group", "leaf"])
-    sp.add_argument("--goal")
-    sp.add_argument("--check", action="append", default=[], help="judgement checklist entry (repeat)")
-    sp.add_argument("--check-cmd", action="append", default=[],
-                    help="command entry (repeat): one shell line `verify` runs in the item's working tree, "
-                         "paths relative to it, passing on exit 0")
-    sp.add_argument("--returns")
-    sp.add_argument("--needs", help="comma-separated question ids")
-    sp.add_argument("--depends", help="comma-separated item ids")
-    sp.add_argument("--skill", help="absolute path of the skill's SKILL.md")
-    sp.add_argument("--small", action="store_true")
-    sp.add_argument("--writes", action="store_true",
-                    help="the leaf changes workspace files (needs a git repository); git records its changes")
-    sp.add_argument("--discovers", help="childless group this discovery leaf answers")
-    sp.add_argument("--chain-after", help="make the leaf the next step of this leaf's chain (API-14)")
-    sp = cmd("drop", "Drop a pending item, or a group's pending descendants.")
-    sp.add_argument("id")
-    why = sp.add_mutually_exclusive_group()
-    why.add_argument("--cause")
-    why.add_argument("--unneeded", action="store_true",
-                     help="drop a done leaf an answer made unneeded; a writes item's patch must be reversed first")
-    cmd("validate", "Check the plan; prints {ok, problems}.")
-    sp = cmd("ask", "Add a question; prints {id}.")
-    sp.add_argument("--type", required=True, choices=["scope", "user_only"])
-    sp.add_argument("--text", required=True)
-    sp.add_argument("--default", required=True)
-    sp = cmd("asked", "Record that questions were put to the user; prints {ids, round}.")
-    sp.add_argument("--ids", required=True)
-    sp = cmd("answer", "Settle or change an answer.")
-    sp.add_argument("--id", required=True)
-    sp.add_argument("--text", required=True)
-    sp.add_argument("--source", required=True, choices=["user", "default_accepted", "default_unconfirmed"])
-    cmd("status", "Print the plan, answers and decisions as JSON.")
-    cmd("handoff", "Print the restart summary and the exact next command.")
-    cmd("next", "Print ready batches, blocked items and groups to expand.")
-    sp = cmd("changes", "List the files a running --writes item changed since its checkpoint; "
-                        "prints {id, edits, files, unlisted}.")
-    sp.add_argument("id")
-    sp = cmd("verify", "Run a running item's command entries in its working tree; prints {id, attempt, checks, "
-                       "passed}, exit 1 when one fails.")
-    sp.add_argument("id")
-    sp = cmd("checkpoint", "Chain executor only: mark the end of a writes step; prints {id, ref}.")
-    sp.add_argument("id")
-    sp = cmd("brief", "Start items and print their brief.")
-    sp.add_argument("ids", help="item id or comma-separated batch")
-    sp.add_argument("--mode", choices=["main_session"])
-    sp = cmd("complete", "Record an executor's reply for one item.")
-    sp.add_argument("id")
-    sp.add_argument("--attempt", required=True, type=int)
-    sp.add_argument("--verdict", required=True, choices=["pass", "fail", "blocked", "held"])
-    sp.add_argument("--result")
-    sp.add_argument("--summary")
-    sp.add_argument("--reason")
-    sp.add_argument("--question")
-    sp = cmd("decide", "Record a decision with its rejected options.")
-    sp.add_argument("--item", required=True)
-    sp.add_argument("--question", required=True)
-    sp.add_argument("--criteria", required=True)
-    sp.add_argument("--chosen", required=True)
-    sp.add_argument("--reject", action="append", default=[], help="\"<option>::<reason>\" (repeat)")
-    return ap
+    s = cmd("start", "Create a task from a plan file; prints the questions to ask, or the first action.", task=False)
+    s.add_argument("--plan", required=True, help="plan JSON file, or - for stdin (SKILL.md shows the format)")
+    s.add_argument("--statement", required=True, help="the user's request, verbatim")
+    s.add_argument("--root", default=".", help="the folder the items change, where their file paths start "
+                                               "(default: the current folder)")
+    s.add_argument("--new-files", action="store_true", help="every planned file is new")
+    s.add_argument("--mode", choices=("auto", "delegate", "main_session"), default="auto",
+                   help="auto: one run is done in the main session, more go to executors; delegate: always "
+                        "executors; main_session: everything in the main session")
+    s.add_argument("--max-parallel", type=int, default=MAX_PARALLEL, help="most runs at once")
+    s.add_argument("--review", choices=("auto", "always", "never"), default="auto",
+                   help="auto: review the work that executors did, not the coordinator's own")
+    s = cmd("plan", "Apply an edited plan file (default: the task's plan.json) to the items not started.")
+    s.add_argument("file", nargs="?")
+    s = cmd("answer", "Record an answer; --defaults accepts every open question's default.")
+    s.add_argument("--id")
+    s.add_argument("--text")
+    s.add_argument("--source", choices=SOURCES, default="user")
+    s.add_argument("--defaults", action="store_true")
+    cmd("next", "Land finished runs, run the task checks, and print the next action.")
+    s = cmd("done", "Executor: run an item's checks and commit it.")
+    s.add_argument("id")
+    s.add_argument("--result", help="a read-only item's result file (default: the path its brief names)")
+    s.add_argument("--no-change", help="why the item needs no file change")
+    s = cmd("block", "Executor: park an item on a question for the user or an approval.")
+    s.add_argument("id")
+    s.add_argument("--question")
+    s.add_argument("--default", help="the answer you would act on")
+    s.add_argument("--approval", help="the step outside the goal")
+    s = cmd("decide", "Record a choice, its criteria and each rejected option.")
+    s.add_argument("--question", required=True)
+    s.add_argument("--chosen", required=True)
+    s.add_argument("--reject", action="append", default=[], help="\"<option>::<why it lost>\", once per option")
+    s.add_argument("--criteria", help="question ids holding the criteria")
+    s.add_argument("--because", help="workspace evidence, when no question holds the criteria")
+    s.add_argument("--supersedes")
+    cmd("status", "Print the plan, answers, decisions, progress and the next command.")
+    s = cmd("resume", "Restart a stopped task after the user replied.")
+    s.add_argument("--approve", help="item ids whose step the user approved")
+    s.add_argument("--deny", help="item ids whose step the user refused")
+    s.add_argument("--new-session", action="store_true")
+    s = cmd("stop", "Stop the task.")
+    s.add_argument("--condition", choices=("user", "fault"), required=True)
+    s.add_argument("--detail", required=True)
+    cmd("finish", "Check that everything is committed and passes; complete the task and print its summary.")
+    s = cmd("mark", "Record the user's mark.")
+    s.add_argument("--mark", choices=("accepted", "reworked", "unmarked"), required=True)
+    s.add_argument("--reason")
+    s = cmd("log", "Record a run-record event.")
+    s.add_argument("event", choices=LOG_EVENTS)
+    s.add_argument("--ref")
+    s.add_argument("--data", help="JSON object")
+    return p
 
 
-def _argv_for_record(argv):
-    out, skip = [], False
-    for i, x in enumerate(argv):
-        if skip:
-            skip = False
-            continue
-        if x == "--task":
-            skip = True
-            continue
-        if x.startswith("--task="):
-            continue
-        out.append(x)
-    return out
+COMMANDS = {"next": cmd_next, "plan": cmd_plan, "answer": cmd_answer, "done": cmd_done, "block": cmd_block,
+            "decide": cmd_decide, "status": cmd_status, "resume": cmd_resume, "stop": cmd_stop,
+            "finish": cmd_finish, "mark": cmd_mark, "log": cmd_log}
+ANY_STATUS = {"status", "answer", "resume", "stop", "log", "mark", "finish", "next", "done", "block"}
 
 
 def run(argv):
     a = build_parser().parse_args(argv)
-    rec_argv = _argv_for_record(argv)
-    if a.command == "init":
-        return cmd_init(a, rec_argv)
+    if a.command == "start":
+        return cmd_start(a)
     task = Task(a.task)
-    if not os.path.isdir(task.dir):
-        raise Fail("bad_input", f"no task folder {task.dir}", 2)
-    if a.command not in WRITERS:
-        st = task.load()
-        if a.command == "status":
-            return cmd_status(st)
-        if a.command == "handoff":
-            return cmd_handoff(task, st)
-        if a.command == "next":
-            return compute_next(st, task.record_lines()[0])
-        if a.command == "changes":
-            return cmd_changes(task, st, a)
-        if a.command == "checkpoint":
-            return cmd_checkpoint(task, st, a)
-        res = cmd_validate(st)
-        if not res["ok"]:
-            print(json.dumps(res, ensure_ascii=False))
-            raise Fail("validate_failed", f"{len(res['problems'])} plan problem(s)", 1, "needs_fix",
-                       "fix each problem with add or drop, then validate again")
-        return res
-    # slow commands run before the lock, so they do not hold other writing commands
-    if a.command == "verify":
-        a.attempt_seen = require_item(task.load(), a.id)["briefs"]
-        run_verify(task, a)
-    if a.command == "finish":
-        st = task.load()
-        a.rerun = finish_rerun(task, st) if any(it.get("writes") for it in st["items"]) else None
-    task.lock()
-    try:
-        if a.command == "resume":
-            return cmd_resume(task, rec_argv)
-        st = task.load()
-        lines, torn = task.record_lines()
-        if torn is not None or any(l["seq"] > st.get("applied_seq", 0) for l in lines):
-            raise Fail("record_torn", "the run record has lines state.json lacks", 3, "auto_retry",
-                       f"python3 {SCRIPT} resume --task {shlex.quote(task.dir)}")
-        next_seq = (lines[-1]["seq"] + 1) if lines else 1
-        w = Writer(task, st, rec_argv, next_seq=next_seq)
-        out = COMMANDS[a.command](task, st, a, w)
-        w.commit()
-        if a.command == "verify" and not out["passed"]:
-            print(json.dumps(out, ensure_ascii=False))
-            failed = next(c for c in out["checks"] if c["exit_code"] != 0)
-            reason = f"check failed: {failed['command']}, log {failed['log']}"
-            raise Fail("checks_failed", f"{a.id}: a command entry failed; see the logs", 1, "needs_fix",
-                       f"python3 {SCRIPT} complete {a.id} --task {shlex.quote(task.dir)} --attempt {out['attempt']} "
-                       f"--verdict fail --reason {shlex.quote(reason)}")
-        return out
-    finally:
-        task.unlock()
+    if not os.path.isfile(task.state_path):
+        raise Fail("bad_input", f"no task at {task.dir} (no state.json)", 2)
+    if a.command not in ANY_STATUS and task.load()["status"] == "stopped":
+        raise Fail("task_stopped", "the task is stopped", 1, "needs_user", stop_action(task, task.load())["next"])
+    return COMMANDS[a.command](task, a)
 
 
 def main(argv=None):
@@ -1718,10 +1586,9 @@ def main(argv=None):
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 0
     except Fail as e:
-        print(f"ERROR [{e.code}] {e.message}\nresolves: {e.resolves}\nnext: {e.nxt or 'see --help'}",
-              file=sys.stderr)
+        print(f"ERROR [{e.code}] {e.message}\nresolves: {e.resolves}\nnext: {e.nxt or 'see --help'}", file=sys.stderr)
         return e.exit_code
-    print(out if isinstance(out, str) else json.dumps(out, ensure_ascii=False))
+    print(json.dumps(out, ensure_ascii=False))
     return 0
 
 
