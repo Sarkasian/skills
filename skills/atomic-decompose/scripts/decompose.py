@@ -13,6 +13,10 @@ Exit codes: 0 ok, 1 a check failed or work is refused, 2 bad input, 3 saved-stat
 The coordinator plans and asks; this script groups the work. Items that share a file, or depend on
 each other, form one run: one executor does them in order, calling `done` after each. Runs that share
 no file work at once, each in its own git worktree. One run works in place.
+max_parallel, runs a delegate executor may launch at once, is the task's own value: the first setting that
+applies at start is --max-parallel, the plan's max_parallel, AD_MAX_PARALLEL, ~/.config/atomic-decompose/
+config.json (Windows %APPDATA%), .atomic-decompose.json in the git top, then 4. doctor reports which applies
+and from where; tune changes the task value between rounds.
 """
 from __future__ import annotations
 
@@ -32,9 +36,12 @@ import tempfile
 import time
 
 SCHEMA = 2
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 TRIES = 3
 MAX_PARALLEL = 4
+MAX_PARALLEL_LIMIT = 64
+ENV_MAX_PARALLEL = "AD_MAX_PARALLEL"
+PROJECT_CONFIG = ".atomic-decompose.json"
 CHECK_TIMEOUT_S = 600
 AUTO_FIXES = 2
 LOCK_WAIT_S = 60
@@ -74,6 +81,62 @@ def cmd_line(task, *args):
 
 
 # ---------------------------------------------------------------- saved state
+
+def usable_max_parallel(v):
+    return isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= MAX_PARALLEL_LIMIT
+
+
+def user_config_path():
+    base = os.environ.get("APPDATA" if os.name == "nt" else "XDG_CONFIG_HOME")
+    return os.path.join(base or os.path.expanduser("~" if os.name == "nt" else "~/.config"),
+                        "atomic-decompose", "config.json")
+
+
+def read_config_file(path):
+    """(config, problem); config is None when the file sets nothing usable."""
+    if not os.path.isfile(path):
+        return None, None
+    try:
+        data = json.load(open(path, encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return None, f"{path} is not JSON"
+    if not isinstance(data, dict):
+        return None, f"{path} is not a JSON object"
+    if "max_parallel" in data and not usable_max_parallel(data["max_parallel"]):
+        return None, f"{path} has no usable 'max_parallel' (want 1 to {MAX_PARALLEL_LIMIT})"
+    return data, None
+
+
+def max_parallel_layers(flag, plan, root, top):
+    """Candidate max_parallel settings in priority order as (layer, value); None sets nothing.
+    problems names settings a start here would not be able to use."""
+    env_raw = os.environ.get(ENV_MAX_PARALLEL)
+    env_val = int(env_raw) if env_raw is not None and env_raw.strip().lstrip("-").isdigit() else env_raw
+    layers = [("flag", flag), ("plan", plan.get("max_parallel")), ("env", env_val)]
+    problems = [f"{ly} sets max_parallel {v}, not an integer from 1 to {MAX_PARALLEL_LIMIT}"
+                for ly, v in layers[:3] if v is not None and not usable_max_parallel(v)]
+    for layer, path in (("user_config", user_config_path()),
+                        ("project_config", os.path.join(top or root, PROJECT_CONFIG))):
+        cfg, problem = read_config_file(path)
+        problems += [problem] if problem else []
+        if cfg is not None:
+            layers.append((layer, cfg["max_parallel"]))
+    layers.append(("default", MAX_PARALLEL))
+    return layers, problems
+
+
+def resolve_max_parallel(flag, plan, root, top):
+    """The first usable setting in the chain; an unusable setting above the winner fails."""
+    layers, problems = max_parallel_layers(flag, plan, root, top)
+    for layer, v in layers:
+        if v is None:
+            continue
+        if not usable_max_parallel(v):
+            raise Fail("plan_invalid", f"max_parallel from {layer} is not an integer from 1 to "
+                                       f"{MAX_PARALLEL_LIMIT}")
+        return v, layer, problems
+    return MAX_PARALLEL, "default", problems
+
 
 class Task:
     def __init__(self, task_dir):
@@ -684,6 +747,9 @@ def start_runs(task, st, groups):
             task.event("item_started", i, {"run": rid, "try": by[i]["tries"] + 1})
         st["runs"].append(run)
         run["brief"] = write_brief(task, st, run)
+        if st["mode"] == "delegate" and not use_worktrees:  # no worktrees, so parallel briefs would collide
+            run["brief"] += ("\nCap: do not launch these briefs in parallel outside a git worktree "
+                             f"(max_parallel={st['max_parallel']}). Launch one at a time in the plain tree.")
         runs.append(run)
     return runs
 
@@ -908,6 +974,7 @@ def cmd_start(a):
         raise Fail("bad_input", f"no folder {root}", 2)
     plan = read_plan_file(a.plan)
     top = git_top(root)
+    max_parallel, max_layer, config_problems = resolve_max_parallel(a.max_parallel, plan, root, top)
     stamp = _dt.datetime.now().strftime("%Y%m%d")
     slug = re.sub(r"[^a-z0-9]+", "-", str(plan.get("question") or "task").lower()).strip("-")[:40] or "task"
     base = os.path.join(root, TASK_DIR, f"{stamp}-{slug}")
@@ -918,7 +985,8 @@ def cmd_start(a):
     st = {"schema_version": SCHEMA, "version": VERSION, "task_id": os.path.basename(tdir), "root": root,
           "git_top": top, "statement": a.statement, "question": "", "requirements": [], "check_cmd": [],
           "check_timeout_s": int(plan.get("check_timeout_s") or CHECK_TIMEOUT_S), "mode": a.mode,
-          "max_parallel": a.max_parallel, "review": a.review, "review_state": "none", "auto_fixes": 0,
+          "max_parallel": max_parallel, "max_parallel_layer": max_layer,
+          "review": a.review, "review_state": "none", "auto_fixes": 0,
           "status": "active", "stop": None, "questions": [], "decisions": [], "items": [], "runs": [],
           "base_head": head(top) if top else None, "started_at": _now(), "updated_at": None, "mark": None}
     planned = sorted({f for raw in plan_items(plan) if isinstance(raw, dict)
@@ -954,7 +1022,10 @@ def cmd_start(a):
     task.save(st)
     task.event("engaged", None, {"statement": a.statement, "version": VERSION})
     task.event("plan_changed", None, out)
-    return {"task_dir": tdir, "plan": task.plan_path, **locked(task, lambda s: advance(task, s))}
+    out = {"task_dir": tdir, "plan": task.plan_path, "max_parallel": max_parallel,
+           "max_parallel_layer": max_layer}
+    return {**out, **({"config_problems": config_problems} if config_problems else {}),
+            **locked(task, lambda s: advance(task, s))}
 
 
 def advance(task, st):
@@ -1105,6 +1176,20 @@ def cmd_plan(task, a):
         task.event("plan_changed", None, out)
         task.save(st)
         return {**out, "next": cmd_line(task, "next")}
+    return locked(task, go)
+
+
+def cmd_tune(task, a):
+    def go(st):
+        if not usable_max_parallel(a.max_parallel):
+            raise Fail("bad_input", f"max_parallel must be an integer from 1 to {MAX_PARALLEL_LIMIT}", 2)
+        old = st["max_parallel"]
+        st["max_parallel"] = a.max_parallel
+        task.save(st)
+        task.event("tune", None, {"max_parallel": a.max_parallel, "previous": old})
+        return {"max_parallel": a.max_parallel, "previous": old,
+                "next": cmd_line(task, "next") + " (applies to the next round; runs already started "
+                                                 "keep their briefs)"}
     return locked(task, go)
 
 
@@ -1389,6 +1474,20 @@ def cmd_resume(task, a):
     return locked(task, go)
 
 
+def cmd_doctor(a):
+    root, top = os.path.realpath(a.root), git_top(os.path.realpath(a.root))
+    layers, problems = max_parallel_layers(a.max_parallel, {}, root, top)
+    layer, value = next((ly, v) for ly, v in layers if v is not None and usable_max_parallel(v))
+    return {"max_parallel": value, "layer": layer,
+            "layers": {"default": MAX_PARALLEL, "env": os.environ.get(ENV_MAX_PARALLEL),
+                       "user_config": user_config_path(),
+                       "project_config": os.path.join(top or root, PROJECT_CONFIG)},
+            "git": {"root": root, "top": top, "worktrees": top is not None}, "cpus": os.cpu_count(),
+            "problems": problems,
+            "next": "start --max-parallel N sets the task value; ad tune --max-parallel N --task <dir> "
+                    "changes it for the next round"}
+
+
 def cmd_stop(task, a):
     def go(st):
         do_stop(task, st, a.condition, a.detail)
@@ -1453,6 +1552,7 @@ def summary(task, st):
             "changed_answers": [{"id": q["id"], "affected": q["affected"]} for q in st["questions"] if q["changed_at"]],
             "review": os.path.join(task.dir, "review.md") if st["review_state"] == "done" else None,
             "untracked_left": st.get("untracked_left", []),
+            "max_parallel": st["max_parallel"],
             "cost": {"wall_s": round((_ts(end) - _ts(st["started_at"])).total_seconds()),
                      "runs": len([r for r in st["runs"] if r["kind"] == "work"]),
                      "parallel_runs": len([r for r in st["runs"] if r.get("worktree")]),
@@ -1515,7 +1615,10 @@ def build_parser():
     s.add_argument("--mode", choices=("auto", "delegate", "main_session"), default="auto",
                    help="auto: one run is done in the main session, more go to executors; delegate: always "
                         "executors; main_session: everything in the main session")
-    s.add_argument("--max-parallel", type=int, default=MAX_PARALLEL, help="most runs at once")
+    s.add_argument("--max-parallel", type=int, default=None,
+                   help="most runs at once; the task value is the first setting that applies: this flag, "
+                        "the plan file's max_parallel, AD_MAX_PARALLEL, the user config file, "
+                        f"{PROJECT_CONFIG} in the git top, {MAX_PARALLEL}")
     s.add_argument("--review", choices=("auto", "always", "never"), default="auto",
                    help="auto: review the work that executors did, not the coordinator's own")
     s = cmd("plan", "Apply an edited plan file (default: the task's plan.json) to the items not started.")
@@ -1558,12 +1661,19 @@ def build_parser():
     s.add_argument("event", choices=LOG_EVENTS)
     s.add_argument("--ref")
     s.add_argument("--data", help="JSON object")
+    s = cmd("tune", "Change the task's max_parallel for the next round.")
+    s.add_argument("--max-parallel", type=int, required=True,
+                   help=f"an integer from 1 to {MAX_PARALLEL_LIMIT}")
+    d = cmd("doctor", "Show which max_parallel applies to a folder and from which layer.", task=False)
+    d.add_argument("--root", default=".", help="workspace to check (default: the current folder)")
+    d.add_argument("--max-parallel", type=int, default=None,
+                   help="what a start --max-parallel here would set")
     return p
 
 
 COMMANDS = {"next": cmd_next, "plan": cmd_plan, "answer": cmd_answer, "done": cmd_done, "block": cmd_block,
             "decide": cmd_decide, "status": cmd_status, "resume": cmd_resume, "stop": cmd_stop,
-            "finish": cmd_finish, "mark": cmd_mark, "log": cmd_log}
+            "finish": cmd_finish, "mark": cmd_mark, "log": cmd_log, "tune": cmd_tune}
 ANY_STATUS = {"status", "answer", "resume", "stop", "log", "mark", "finish", "next", "done", "block"}
 
 
@@ -1571,6 +1681,8 @@ def run(argv):
     a = build_parser().parse_args(argv)
     if a.command == "start":
         return cmd_start(a)
+    if a.command == "doctor":
+        return cmd_doctor(a)
     task = Task(a.task)
     if not os.path.isfile(task.state_path):
         raise Fail("bad_input", f"no task at {task.dir} (no state.json)", 2)
