@@ -912,6 +912,27 @@ def test_max_parallel_config_chain():
     check(out["action"] == "dispatch" and len(out["runs"]) == 2
           and all(r["worktree"] and os.path.isfile(r["brief"]) for r in state(t4)["runs"]),
           "[P4] two writer runs each get a worktree and a brief file that exists")
+    t7, _ = start(repo(), [item("P", ["mod.py"])], "--max-parallel", "2")
+    with open(os.path.join(t7, "plan.json")) as f:
+        plan = json.load(f)
+    plan["items"].append(item("Q", ["other.py"]))
+
+    def plan_with(cap):  # a successful plan rewrites the file, so each step writes it again
+        with open(os.path.join(t7, "plan.json"), "w") as f:
+            json.dump({**plan, "max_parallel": cap}, f)
+    plan_with(7)
+    err = refused("plan_invalid", 2, "plan", "--task", t7)
+    check("tune --max-parallel" in err and state(t7)["max_parallel"] == 2 and len(state(t7)["items"]) == 1,
+          "[P5] plan refuses a max_parallel that is not the task's, names tune, and changes nothing")
+    plan_with(2)
+    out, _ = run("plan", "--task", t7)
+    check(out["added"] == ["2"] and state(t7)["max_parallel"] == 2,
+          "[P5] a plan file that carries the task's own max_parallel is applied")
+    run("tune", "--max-parallel", "5", "--task", t7)
+    plan_with(2)
+    refused("plan_invalid", 2, "plan", "--task", t7)
+    check(state(t7)["max_parallel"] == 5 and len(state(t7)["items"]) == 2,
+          "[P5] after tune, a plan file with the old value is refused and the tuned value stays")
 
 
 def test_max_parallel_config_problems():

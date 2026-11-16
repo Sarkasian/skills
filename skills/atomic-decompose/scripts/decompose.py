@@ -1170,6 +1170,12 @@ def cmd_plan(task, a):
     def go(st):
         if st["status"] == "complete":
             raise Fail("task_complete", "the task is complete; `mark --mark reworked` reopens it", 1)
+        cap = plan.get("max_parallel")  # read once, at start: a stale plan file must not undo a tune
+        if cap is not None and cap != st["max_parallel"]:
+            raise Fail("plan_invalid", f"the plan file sets max_parallel {cap!r}; the task has "
+                       f"{st['max_parallel']} and `plan` does not change it", 2, "needs_fix",
+                       "take max_parallel out of the plan file and rerun; to change the task's value run "
+                       + cmd_line(task, "tune", "--max-parallel", "N"))
         out = apply_plan(st, plan, task)
         task.event("plan_changed", None, out)
         task.save(st)
