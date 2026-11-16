@@ -554,8 +554,15 @@ def test_docs_name_real_commands():
     used = set(re.findall(r"`ad (\w+)", skill))
     check(used and used <= names, f"[W13] SKILL.md names only real commands: {sorted(used - names)}")
     check(len(skill) <= 8000, f"[W13] SKILL.md is at most 8,000 characters ({len(skill)})")
-    # cap raised 1,600 -> 1,750 for the max_parallel config chain, ad doctor, ad tune (+113 lines)
+    # cap raised 1,600 -> 1,750 for the max_parallel settings, doctor and tune (1,596 lines on 0.2.0, 1,710 on 0.3.0)
     check(len(open(dc.SCRIPT).read().split("\n")) <= 1750, "[W13] decompose.py is at most 1,750 lines")
+    check(re.search(rf"^  version: {re.escape(dc.VERSION)}$", skill, re.M),
+          f"[W13] SKILL.md's metadata.version is the script's VERSION, {dc.VERSION}")
+    check(f"\n## {dc.VERSION} " in open(os.path.join(HERE, "CHANGELOG.md")).read(),
+          f"[W13] CHANGELOG.md has an entry for {dc.VERSION}")
+    readme = open(os.path.join(HERE, "..", "..", "README.md")).read()
+    check(dc.ENV_MAX_PARALLEL in readme and dc.PROJECT_CONFIG in readme,
+          "[W13] README.md names the max_parallel environment variable and the project config file")
 
 
 sys.path.insert(0, HERE)
