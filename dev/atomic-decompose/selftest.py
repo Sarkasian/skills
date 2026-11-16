@@ -2,8 +2,9 @@
 """Runnable check: `python3 selftest.py` exits 0 when every assertion holds.
 
 Standard library only, plus `git`. Runs `skills/atomic-decompose/scripts/decompose.py` in-process against
-temporary git repositories with HOME pointed into a temporary folder, and `report.py` beside this file on
-sample evaluation runs and weekly records.
+temporary git repositories with HOME and the user config folder (XDG_CONFIG_HOME, APPDATA) pointed into a
+temporary folder and AD_MAX_PARALLEL cleared, and `report.py` beside this file on sample evaluation runs and
+weekly records.
 """
 from __future__ import annotations
 
@@ -24,6 +25,10 @@ import decompose as dc  # noqa: E402
 
 TMP = tempfile.mkdtemp(prefix="ad-selftest-")
 os.environ["HOME"] = TMP
+# the user config path reads these before HOME, and the machine's own max_parallel must not reach the tests
+os.environ["XDG_CONFIG_HOME"] = os.path.join(TMP, ".config")
+os.environ["APPDATA"] = os.path.join(TMP, "AppData")
+os.environ.pop(dc.ENV_MAX_PARALLEL, None)
 for k, v in {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
              "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_NOSYSTEM": "1"}.items():
     os.environ[k] = v
@@ -769,6 +774,8 @@ def test_report_weekly():
 
 
 def test_max_parallel_config_chain():
+    check(dc.user_config_path().startswith(TMP + os.sep) and dc.ENV_MAX_PARALLEL not in os.environ,
+          "[P5] the selftest's user config path is in its temporary folder and AD_MAX_PARALLEL is cleared")
     root = repo()
     t, out = start(root, [item("A", ["mod.py"])])
     check(out["max_parallel"] == dc.MAX_PARALLEL and out["max_parallel_layer"] == "default"
