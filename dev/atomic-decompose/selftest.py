@@ -563,6 +563,9 @@ def test_docs_name_real_commands():
           f"[W13] SKILL.md's metadata.version is the script's VERSION, {dc.VERSION}")
     check(f"\n## {dc.VERSION} " in open(os.path.join(HERE, "CHANGELOG.md")).read(),
           f"[W13] CHANGELOG.md has an entry for {dc.VERSION}")
+    count = len(dc.COMMANDS) + 2  # COMMANDS leaves out start and doctor, which run without a task
+    check(f"{count} commands" in open(os.path.join(HERE, "HOW-IT-WORKS.md")).read(),
+          f"[W13] HOW-IT-WORKS.md gives the number of commands, {count}")
     readme = open(os.path.join(HERE, "..", "..", "README.md")).read()
     check(dc.ENV_MAX_PARALLEL in readme and dc.PROJECT_CONFIG in readme,
           "[W13] README.md names the max_parallel environment variable and the project config file")
