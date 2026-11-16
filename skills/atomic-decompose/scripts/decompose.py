@@ -455,11 +455,13 @@ def apply_plan(st, plan, task):
 
 
 def write_plan_file(task, st):
-    """The task's own plan.json, with ids, is the file to edit for `plan`."""
+    """The task's own plan.json, with ids, is the file to edit for `plan`. Its items carry no status: in a plan
+    file `status` is only ever an instruction (`"dropped"` drops an open item, `"pending"` retries a failed or
+    blocked one), and a status written here would be read back as one. The `status` command shows the statuses."""
     plan = {"question": st["question"], "requirements": st["requirements"], "check_cmd": st["check_cmd"],
             "questions": [{k: q[k] for k in ("id", "type", "text", "default", "because")} for q in st["questions"]],
-            "items": [{**{k: it[k] for k in ("id", "title", "goal", "covers", "files", "check_cmd", "check",
-                                              "needs", "depends", "skill")}, "status": it["status"]}
+            "items": [{k: it[k] for k in ("id", "title", "goal", "covers", "files", "check_cmd", "check",
+                                          "needs", "depends", "skill")}
                       for it in st["items"] if it["status"] != "dropped"]}
     with open(task.plan_path, "w", encoding="utf-8") as f:
         json.dump(plan, f, ensure_ascii=False, indent=1)

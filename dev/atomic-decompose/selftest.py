@@ -459,6 +459,7 @@ def test_plan_edit():
     run("done", "1", "--task", t)
     plan = json.load(open(os.path.join(t, "plan.json")))
     check([i["id"] for i in plan["items"]] == ["1", "2"], "[W2] the task's plan.json carries ids")
+    check(not any("status" in i for i in plan["items"]), "[W2] the task's plan.json carries no item status")
     plan["items"][1]["check_cmd"] = ["true"]
     plan["items"].append({"title": "C", "goal": "g", "covers": ["R1"], "files": ["other.py"], "check_cmd": ["true"]})
     with open(os.path.join(t, "plan.json"), "w") as f:
@@ -474,6 +475,34 @@ def test_plan_edit():
           "[W2] a partial plan adds items, maps its own ids in depends and keeps the items it leaves out")
     out, _ = run("plan", plan_file([{"id": "3", "status": "dropped"}]), "--task", t)
     check(out["dropped"] == ["3"], "[W2] an item is dropped by status dropped")
+
+
+def test_plan_leaves_failed_and_blocked_items():
+    root = repo()
+    t, _ = start(root, [item("Break", ["mod.py"]), item("Park", ["mod.py"], check_cmd=["true"])])
+    path = os.path.join(t, "plan.json")
+    append(os.path.join(root, "mod.py"), "def base():\n    return 2\n")
+    for code in ("check_failed", "check_failed", "item_failed"):
+        refused(code, 1, "done", "1", "--task", t)
+    run("block", "2", "--approval", "delete mod.py", "--task", t)
+    plan = json.load(open(path))
+    plan["items"].append(item("C", ["README.md"], check_cmd=["true"]))
+    with open(path, "w") as f:
+        json.dump(plan, f)
+    out, _ = run("plan", "--task", t)  # before the next `next`: the task is still running
+    check(out["added"] == ["3"] and out["edited"] == [] and it(t, "1")["status"] == "failed"
+          and it(t, "1")["tries"] == 3,
+          "[W2] a plan that only adds an item leaves a failed item failed, with its tries, and does not list it")
+    check(it(t, "2")["status"] == "blocked" and it(t, "2")["block"]["text"] == "delete mod.py",
+          "[W2] a plan that only adds an item leaves a blocked item blocked, with its block")
+    plan = json.load(open(path))
+    plan["items"][0]["status"] = "pending"
+    with open(path, "w") as f:
+        json.dump(plan, f)
+    out, _ = run("plan", "--task", t)
+    check(out["edited"] == ["1"] and out["added"] == [] and it(t, "1")["status"] == "pending"
+          and it(t, "1")["tries"] == 0,
+          "[W2] status pending in the plan file sets a failed item to pending with no tries used, as edited")
 
 
 def test_decide_and_status():
