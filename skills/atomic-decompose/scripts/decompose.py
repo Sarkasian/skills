@@ -1406,6 +1406,8 @@ def cmd_block(task, a):
         it.update(status="blocked", block=block)
         task.event("item_blocked", a.id, block)
         task.save(st)
+        if a.question:  # the item's new need must be in plan.json too, or the next `plan` reads an edit and unblocks it
+            write_plan_file(task, st)
         return {"id": a.id, "status": "blocked", "next": next_in_run(task, st, it)}
     return locked(task, go)
 

@@ -479,22 +479,27 @@ def test_plan_edit():
 
 def test_plan_leaves_failed_and_blocked_items():
     root = repo()
-    t, _ = start(root, [item("Break", ["mod.py"]), item("Park", ["mod.py"], check_cmd=["true"])])
+    t, _ = start(root, [item("Break", ["mod.py"]), item("Park", ["mod.py"], check_cmd=["true"]),
+                        item("Ask", ["mod.py"], check_cmd=["true"])])
     path = os.path.join(t, "plan.json")
     append(os.path.join(root, "mod.py"), "def base():\n    return 2\n")
     for code in ("check_failed", "check_failed", "item_failed"):
         refused(code, 1, "done", "1", "--task", t)
     run("block", "2", "--approval", "delete mod.py", "--task", t)
+    run("block", "3", "--question", "Which title?", "--task", t)
     plan = json.load(open(path))
     plan["items"].append(item("C", ["README.md"], check_cmd=["true"]))
     with open(path, "w") as f:
         json.dump(plan, f)
     out, _ = run("plan", "--task", t)  # before the next `next`: the task is still running
-    check(out["added"] == ["3"] and out["edited"] == [] and it(t, "1")["status"] == "failed"
+    check(out["added"] == ["4"] and "1" not in out["edited"] and it(t, "1")["status"] == "failed"
           and it(t, "1")["tries"] == 3,
           "[W2] a plan that only adds an item leaves a failed item failed, with its tries, and does not list it")
     check(it(t, "2")["status"] == "blocked" and it(t, "2")["block"]["text"] == "delete mod.py",
           "[W2] a plan that only adds an item leaves a blocked item blocked, with its block")
+    ask = it(t, "3")  # `block --question` gives the item a need that the plan file must carry too
+    check(out["edited"] == [] and ask["status"] == "blocked" and ask["needs"] == [ask["block"]["question"]],
+          "[W2] a plan that only adds an item leaves an item blocked on a question blocked, with its need")
     plan = json.load(open(path))
     plan["items"][0]["status"] = "pending"
     with open(path, "w") as f:
@@ -586,7 +591,7 @@ def test_docs_name_real_commands():
     unprompted = {"start", "next", "status", "plan", "decide", "mark", "log"}
     check(unprompted <= used, f"[W13] SKILL.md names every command it must: {sorted(unprompted - used)}")
     check(len(skill) <= 6000, f"[W13] SKILL.md is at most 6,000 characters ({len(skill)})")
-    # cap raised 1,600 -> 1,750 for the max_parallel settings, doctor and tune (1,596 lines on 0.2.0, 1,718 on 0.3.0)
+    # cap raised 1,600 -> 1,750 for the max_parallel settings, doctor and tune (1,596 lines on 0.2.0, 1,720 on 0.3.0)
     check(len(open(dc.SCRIPT).read().split("\n")) <= 1750, "[W13] decompose.py is at most 1,750 lines")
     check(re.search(rf"^  version: {re.escape(dc.VERSION)}$", skill, re.M),
           f"[W13] SKILL.md's metadata.version is the script's VERSION, {dc.VERSION}")
