@@ -437,7 +437,11 @@ def apply_plan(st, plan, task):
         elif old["status"] in open_states:
             fields = {k: new[k] for k in ("title", "goal", "covers", "files", "check_cmd", "check", "needs",
                                           "depends", "skill")}
-            if any(old[k] != v for k, v in fields.items()) or (old["status"] != "pending"
+            # Compare like with like: the item as a plan file gives it. `block --question` adds its question to the
+            # item's needs in the state alone, so that need is no edit; a real edit withdraws the question.
+            asked, was = (old["block"] or {}).get("question"), normalise_item(old)
+            was["needs"], fields["needs"] = ([n for n in ns if n != asked] for ns in (was["needs"], fields["needs"]))
+            if any(was[k] != v for k, v in fields.items()) or (old["status"] != "pending"
                                                                 and raw.get("status") == "pending"):
                 old.update(fields, status="pending", block=None, failure=None, tries=0)
                 out["edited"].append(old["id"])
@@ -1406,8 +1410,6 @@ def cmd_block(task, a):
         it.update(status="blocked", block=block)
         task.event("item_blocked", a.id, block)
         task.save(st)
-        if a.question:  # the item's new need must be in plan.json too, or the next `plan` reads an edit and unblocks it
-            write_plan_file(task, st)
         return {"id": a.id, "status": "blocked", "next": next_in_run(task, st, it)}
     return locked(task, go)
 

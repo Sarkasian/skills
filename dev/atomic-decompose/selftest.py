@@ -398,6 +398,21 @@ def test_task_checks_add_a_fix_item():
     fix = state(t)["items"][-1]
     check(out["action"] == "do_yourself" and fix["origin"] == "task_checks" and "mod.py" in fix["files"],
           "[W6] failing task checks after a run add a fix item over its files")
+    t, _ = start(repo(), [item("Mod", ["mod.py"], check_cmd=["true"])], check_cmd=("false",))  # it prints nothing
+    root, path = state(t)["root"], os.path.join(t, "plan.json")
+    append(os.path.join(root, "mod.py"), "#\n")
+    run("done", "1", "--task", t)
+    run("next", "--task", t)
+    for code in ("check_failed", "check_failed", "item_failed"):
+        append(os.path.join(root, "mod.py"), "#\n")
+        refused(code, 1, "done", "2", "--task", t)
+    plan = json.load(open(path))
+    plan["items"].append(item("C", ["README.md"], check_cmd=["true"]))
+    with open(path, "w") as f:
+        json.dump(plan, f)
+    out, _ = run("plan", "--task", t)
+    check(out["edited"] == [] and it(t, "2")["status"] == "failed" and it(t, "2")["goal"].endswith("\n"),
+          "[W2] a fix item whose goal a plan file reads back stripped is no edit: it stays failed")
 
 
 def test_delegate_single_run():
@@ -497,17 +512,29 @@ def test_plan_leaves_failed_and_blocked_items():
           "[W2] a plan that only adds an item leaves a failed item failed, with its tries, and does not list it")
     check(it(t, "2")["status"] == "blocked" and it(t, "2")["block"]["text"] == "delete mod.py",
           "[W2] a plan that only adds an item leaves a blocked item blocked, with its block")
-    ask = it(t, "3")  # `block --question` gives the item a need that the plan file must carry too
+    ask = it(t, "3")  # `block --question` adds the need in the state alone: the file `start` wrote has none
     check(out["edited"] == [] and ask["status"] == "blocked" and ask["needs"] == [ask["block"]["question"]],
           "[W2] a plan that only adds an item leaves an item blocked on a question blocked, with its need")
-    plan = json.load(open(path))
-    plan["items"][0]["status"] = "pending"
+    plan = json.load(open(path))  # that plan rewrote the file from the state, so item 3 now lists the need
+    check(plan["items"][2]["needs"] == ask["needs"], "[W2] the rewritten plan.json lists the blocked item's need")
+    plan["items"].append(item("D", ["README.md"], check_cmd=["true"]))
     with open(path, "w") as f:
         json.dump(plan, f)
     out, _ = run("plan", "--task", t)
-    check(out["edited"] == ["1"] and out["added"] == [] and it(t, "1")["status"] == "pending"
+    check(out["edited"] == [] and it(t, "3")["status"] == "blocked",
+          "[W2] nor is the item unblocked when the file does list the need its block added")
+    plan = json.load(open(path))
+    plan["items"][0]["status"] = "pending"
+    plan["items"][2]["check_cmd"] = [TEST]  # the check_broken recovery: the coordinator fixes the check
+    with open(path, "w") as f:
+        json.dump(plan, f)
+    out, _ = run("plan", "--task", t)
+    check(out["edited"] == ["1", "3"] and out["added"] == [] and it(t, "1")["status"] == "pending"
           and it(t, "1")["tries"] == 0,
           "[W2] status pending in the plan file sets a failed item to pending with no tries used, as edited")
+    ask = it(t, "3")
+    check(ask["status"] == "pending" and ask["block"] is None and ask["needs"] == [],
+          "[W2] an edit to an item blocked on a question withdraws the question, so the item reruns without a stop")
 
 
 def test_decide_and_status():
@@ -591,7 +618,7 @@ def test_docs_name_real_commands():
     unprompted = {"start", "next", "status", "plan", "decide", "mark", "log"}
     check(unprompted <= used, f"[W13] SKILL.md names every command it must: {sorted(unprompted - used)}")
     check(len(skill) <= 6000, f"[W13] SKILL.md is at most 6,000 characters ({len(skill)})")
-    # cap raised 1,600 -> 1,750 for the max_parallel settings, doctor and tune (1,596 lines on 0.2.0, 1,720 on 0.3.0)
+    # cap raised 1,600 -> 1,750 for the max_parallel settings, doctor and tune (1,596 lines on 0.2.0, 1,722 on 0.3.0)
     check(len(open(dc.SCRIPT).read().split("\n")) <= 1750, "[W13] decompose.py is at most 1,750 lines")
     check(re.search(rf"^  version: {re.escape(dc.VERSION)}$", skill, re.M),
           f"[W13] SKILL.md's metadata.version is the script's VERSION, {dc.VERSION}")
@@ -963,9 +990,9 @@ def test_max_parallel_config_chain():
     check(out["added"] == ["2"] and state(t7)["max_parallel"] == 2,
           "[P5] a plan file that carries the task's own max_parallel is applied")
     run("tune", "--max-parallel", "5", "--task", t7)
-    plan_with(2)
-    refused("plan_invalid", 2, "plan", "--task", t7)
-    check(state(t7)["max_parallel"] == 5 and len(state(t7)["items"]) == 2,
+    plan_with(2)  # this file also adds item Q again, a second refusal: the error text must be the max_parallel one
+    err = refused("plan_invalid", 2, "plan", "--task", t7)
+    check("tune --max-parallel" in err and state(t7)["max_parallel"] == 5 and len(state(t7)["items"]) == 2,
           "[P5] after tune, a plan file with the old value is refused and the tuned value stays")
 
 
