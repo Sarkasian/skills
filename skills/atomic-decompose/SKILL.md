@@ -38,7 +38,7 @@ Read only what the plan needs. Then write a plan file, in a temp folder outside 
 - **`questions`**: only what the workspace cannot answer, each with the `default` you would act on. `scope` is audience, depth and criteria; `user_only` is names, budgets, owners and dates; `confirm` is a fact you found that the user should know, with the evidence as `because`. Put each question's id in the `needs` of the items it changes.
 - **`skill`**: the name of an installed skill that fits the item, if one does.
 
-Then run `ad start --root <the repository or folder the request names; file paths start there> --statement "<the request verbatim>" --plan <file>`. Add `--mode delegate` only when the user asks for sub-agents, `--mode main_session` when the host cannot start them, and `--max-parallel <N>` when the user says how many may work at once.
+Then run `ad start --root <the repository or folder the request names; file paths start there> --statement "<the request verbatim>" --plan <file>`. Add `--mode delegate` only when the user asks you to delegate the work, `--mode main_session` when the host cannot start executors, and `--max-parallel <N>` when the user says how many may work at once.
 
 ## 2. Run
 
