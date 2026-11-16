@@ -13,7 +13,7 @@ Exit codes: 0 ok, 1 a check failed or work is refused, 2 bad input, 3 saved-stat
 The coordinator plans and asks; this script groups the work. Items that share a file, or depend on
 each other, form one run: one executor does them in order, calling `done` after each. Runs that share
 no file work at once, each in its own git worktree. One run works in place.
-max_parallel, runs a delegate executor may launch at once, is the task's own value: the first setting that
+max_parallel, the most runs that work at once, is the task's own value: the first setting that
 applies at start is --max-parallel, the plan's max_parallel, AD_MAX_PARALLEL, ~/.config/atomic-decompose/
 config.json (Windows %APPDATA%), .atomic-decompose.json in the git top, then 4. doctor reports which applies
 and from where; tune changes the task value between rounds.
