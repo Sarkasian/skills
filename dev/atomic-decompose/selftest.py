@@ -881,15 +881,21 @@ def test_max_parallel_config_chain():
     check(out["max_parallel"] == 9, "[P3] tune can raise above the chain value")
     refused("bad_input", 2, "tune", "--max-parallel", "65", "--task", t)
     refused("bad_input", 2, "tune", "--max-parallel", "banana", "--task", t)
-    t5, _ = start(repo(), [item("L", ["mod.py"]), item("M", ["README.md"]), item("N", ["other.py"])],
-                  "--max-parallel", "1", "--mode", "delegate")
-    out, _ = run("next", "--task", t5)
-    check(out["action"] == "dispatch" and len(out["runs"]) == 1,
-          "[P3] max_parallel 1 merges the writers into one round")
-    run("tune", "--max-parallel", "3", "--task", t5)
-    out, _ = run("next", "--task", t5)
-    check(out["action"] == "dispatch" and len(out["runs"]) == 3,
-          "[P3] tune raises the very next round to 3 executors")
+    writers = [item("L", ["mod.py"]), item("M", ["README.md"]), item("N", ["other.py"])]
+    t5, out = start(repo(), writers, "--max-parallel", "1", "--mode", "delegate")
+    check(out["action"] == "dispatch" and len(out["runs"]) == 1, "[P3] max_parallel 1 packs the writers into one run")
+    out, _ = run("tune", "--max-parallel", "3", "--task", t5)
+    check("once every executor" in out["next"], "[P3] with a run active, tune says to wait for its executors")
+    t6, out = start(repo(), writers, "--max-parallel", "1", "--mode", "delegate",
+                    questions=[{"type": "scope", "text": "Tabs?", "default": "no"}])
+    check(out["action"] == "ask", "[P3] a question round starts no run")
+    out, _ = run("tune", "--max-parallel", "3", "--task", t6)
+    check(out["next"].endswith(f"--task {t6}"), "[P3] with no run active, tune's next is the plain next command")
+    run("answer", "--defaults", "--task", t6)
+    out, _ = run("next", "--task", t6)
+    check(out["action"] == "dispatch" and len(out["runs"]) == 3 and state(t6)["max_parallel_layer"] == "tune"
+          and all(x["tries"] == 0 for x in state(t6)["items"]),
+          "[P3] tune before a round gives it 3 executors, records the layer, and charges no item a try")
     t3, out = start(repo(), [item(x, [], check="read it") for x in ("H", "I", "I2")], "--mode", "delegate")
     check(out["action"] == "dispatch" and len(out["runs"]) == 3
           and all(r["worktree"] is None and os.path.isfile(r["brief"]) for r in state(t3)["runs"])

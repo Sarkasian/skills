@@ -1182,12 +1182,13 @@ def cmd_tune(task, a):
         if not usable_max_parallel(a.max_parallel):
             raise Fail("bad_input", f"max_parallel must be an integer from 1 to {MAX_PARALLEL_LIMIT}", 2)
         old = st["max_parallel"]
-        st["max_parallel"] = a.max_parallel
+        st["max_parallel"], st["max_parallel_layer"] = a.max_parallel, "tune"
         task.save(st)
         task.event("tune", None, {"max_parallel": a.max_parallel, "previous": old})
-        return {"max_parallel": a.max_parallel, "previous": old,
-                "next": cmd_line(task, "next") + " (applies to the next round; runs already started "
-                                                 "keep their briefs)"}
+        # `next` closes the active runs and charges each unfinished item a try, so it must wait for them
+        wait = (" once every executor of the active runs has replied; the new value applies to the round it starts"
+                if any(r["status"] == "active" for r in st["runs"]) else "")
+        return {"max_parallel": a.max_parallel, "previous": old, "next": cmd_line(task, "next") + wait}
     return locked(task, go)
 
 
