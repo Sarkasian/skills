@@ -801,7 +801,17 @@ def test_max_parallel_config_chain():
     plain = plan_file([item("E2", ["README.md"])])
     for bad in ("banana", "0", "99"):
         with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: bad}):
-            refused("plan_invalid", 2, "start", "--root", root, "--statement", "s", "--plan", plain)
+            err = refused("bad_input", 2, "start", "--root", root, "--statement", "s", "--plan", plain)
+            check("env sets" in err and "resolves: needs_user" in err and "doctor --root" in err,
+                  f"[P1] an unusable AD_MAX_PARALLEL is the user's to fix, and doctor is named: {bad}")
+    err = refused("bad_input", 2, "start", "--root", root, "--statement", "s", "--plan", plain,
+                  "--max-parallel", "0")
+    check("flag sets" in err and "resolves: needs_fix" in err, "[P1] an unusable --max-parallel is refused")
+    bad_plan = os.path.join(TMP, "plan-maxpar-bad.json")
+    with open(pp) as f, open(bad_plan, "w") as g:
+        json.dump({**json.load(f), "max_parallel": 0}, g)
+    err = refused("plan_invalid", 2, "start", "--root", root, "--statement", "s", "--plan", bad_plan)
+    check("plan sets" in err and "resolves: needs_fix" in err, "[P1] an unusable plan max_parallel is refused")
     with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: "banana"}):
         out, _ = run("start", "--root", root, "--statement", "s", "--plan", pp)
         check(out["max_parallel_layer"] == "plan"
@@ -819,11 +829,20 @@ def test_max_parallel_config_chain():
     _, out = start(root2, [item("F", ["mod.py"])])
     check(out["max_parallel"] == 5 and out["max_parallel_layer"] == "user_config",
           "[P1] the user config file beats the default")
-    with open(cfg, "w") as f:
-        f.write("{")
-    _, out = start(root2, [item("G", ["other.py"])])
-    check(out["max_parallel"] == dc.MAX_PARALLEL and any("config.json" in p for p in out["config_problems"]),
-          "[P1] an unreadable user file is reported, not fatal")
+    for text in ("{", "[]", '{"max_parallel": "1"}'):
+        with open(cfg, "w") as f:
+            f.write(text)
+        err = refused("bad_input", 2, "start", "--root", root2, "--statement", "s", "--plan", plain)
+        check("user_config: " + cfg in err and "resolves: needs_user" in err,
+              f"[P1] an unusable user file with nothing set above it refuses start, by layer and path: {text}")
+    _, out = start(root2, [item("G", ["other.py"])], "--max-parallel", "2")
+    check(out["max_parallel"] == 2 and any(cfg in p for p in out["config_problems"]),
+          "[P1] an unusable file below the setting that applies is listed, not fatal")
+    out, _ = run("doctor", "--root", root2)
+    check(out["max_parallel"] is None and out["layer"] == "user_config" and "refuses" in out["next"]
+          and any(cfg in p for p in out["problems"]),
+          "[P2] doctor says a start here would refuse the user file, and exits 0")
+    os.remove(cfg)
     with open(os.path.join(root2, dc.PROJECT_CONFIG), "w") as f:
         json.dump({"max_parallel": 2}, f)
     _, out = start(root2, [item("E3", ["mod.py"])])
@@ -840,8 +859,16 @@ def test_max_parallel_config_chain():
           "[P2] doctor reports the applied setting, its layer, and git facts")
     with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: "banana"}):
         out, _ = run("doctor", "--root", root4)
-        check(any("env" in p for p in out["problems"]),
-              "[P2] doctor names an env setting it cannot use, and exits 0")
+        check(out["max_parallel"] is None and out["layer"] == "env" and "refuses" in out["next"]
+              and any("env" in p for p in out["problems"]),
+              "[P2] doctor says a start here would refuse the env setting, and exits 0")
+        out, _ = run("doctor", "--root", root4, "--max-parallel", "2")
+        check(out["max_parallel"] == 2 and out["layer"] == "flag" and len(out["problems"]) == 1,
+              "[P2] doctor with a usable flag reports it, and only lists the env problem below it")
+    with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: " "}):
+        _, out = start(root4, [item("E5", ["mod.py"])])
+        check(out["max_parallel_layer"] == "default" and "config_problems" not in out,
+              "[P1] an empty AD_MAX_PARALLEL counts as not set")
     out, _ = run("tune", "--max-parallel", "1", "--task", t)
     check(out["max_parallel"] == 1 and state(t)["max_parallel"] == 1,
           "[P3] tune sets the task value for the next round")
@@ -860,8 +887,9 @@ def test_max_parallel_config_chain():
           "[P3] tune raises the very next round to 3 executors")
     t3, out = start(repo(), [item(x, [], check="read it") for x in ("H", "I", "I2")], "--mode", "delegate")
     check(out["action"] == "dispatch" and len(out["runs"]) == 3
-          and all(r["worktree"] is None and os.path.isfile(r["brief"]) for r in state(t3)["runs"]),
-          "[P4] read-only runs go out together, and each run's brief is a file that exists")
+          and all(r["worktree"] is None and os.path.isfile(r["brief"]) for r in state(t3)["runs"])
+          and all(r["prompt"].count("\n") == 0 for r in out["runs"]),
+          "[P4] read-only runs go out together; each brief is a file that exists and each prompt is one line")
     t4, out = start(repo(), [item("J", ["mod.py"]), item("K", ["README.md"])],
                     "--max-parallel", "2", "--mode", "delegate")
     check(out["action"] == "dispatch" and len(out["runs"]) == 2
@@ -888,18 +916,20 @@ def test_max_parallel_config_problems():
         with open(proj, "w") as f:
             f.write('{"max_parallel": 2}')
         os.chmod(proj, 0)
-        _, out = start(root, [item("B", ["other.py"])])
+        plain = plan_file([item("B", ["other.py"])])
+        err = refused("bad_input", 2, "start", "--root", root, "--statement", "s", "--plan", plain)
         doc, _ = run("doctor", "--root", root)
         os.chmod(proj, 0o644)
         os.remove(proj)
-        check(any(proj in p for p in out["config_problems"]) and any(proj in p for p in doc["problems"]),
+        check(f"project_config: {proj} cannot be read" in err and doc["layer"] == "project_config"
+              and doc["max_parallel"] is None and any(proj in p for p in doc["problems"]),
               "[P6] a config file that cannot be read is a named problem, not a crash")
     for bad in ("--3", "\u00b2"):
         with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: bad}):
-            _, err = run("start", "--root", root, "--statement", "s", "--plan",
-                         plan_file([item("C", ["README.md"])]), code=2)
+            refused("bad_input", 2, "start", "--root", root, "--statement", "s", "--plan",
+                    plan_file([item("C", ["README.md"])]))
             doc, _ = run("doctor", "--root", root)
-            check(err.startswith("ERROR [") and any("env" in p for p in doc["problems"]),
+            check(doc["max_parallel"] is None and any("env" in p for p in doc["problems"]),
                   f"[P6] AD_MAX_PARALLEL that is not a number is refused, not a crash: {bad!r}")
 
 

@@ -111,36 +111,24 @@ def read_config_file(path):
     return value, None
 
 
-def max_parallel_layers(flag, plan, root, top):
-    """Candidate max_parallel settings in priority order as (layer, value); None sets nothing.
-    problems names settings a start here would not be able to use."""
-    env_val = os.environ.get(ENV_MAX_PARALLEL)
-    if env_val is not None:
-        with _quiet(ValueError):  # text that is not a whole number stays text: an unusable value
-            env_val = int(env_val)
-    layers = [("flag", flag), ("plan", plan.get("max_parallel")), ("env", env_val)]
-    problems = [f"{ly} sets max_parallel {v}, not an integer from 1 to {MAX_PARALLEL_LIMIT}"
-                for ly, v in layers[:3] if v is not None and not usable_max_parallel(v)]
-    for layer, path in (("user_config", user_config_path()),
-                        ("project_config", os.path.join(top or root, PROJECT_CONFIG))):
-        value, problem = read_config_file(path)
-        problems += [problem] if problem else []
-        layers.append((layer, value))
-    layers.append(("default", MAX_PARALLEL))
-    return layers, problems
-
-
 def resolve_max_parallel(flag, plan, root, top):
-    """The first usable setting in the chain; an unusable setting above the winner fails."""
-    layers, problems = max_parallel_layers(flag, plan, root, top)
-    for layer, v in layers:
-        if v is None:
-            continue
-        if not usable_max_parallel(v):
-            raise Fail("plan_invalid", f"max_parallel from {layer} is not an integer from 1 to "
-                                       f"{MAX_PARALLEL_LIMIT}")
-        return v, layer, problems
-    return MAX_PARALLEL, "default", problems
+    """(value, layer, problems) from the first layer that is set: flag, plan, env, user config file, project
+    config file, default. A layer that is set but cannot be used is a problem. When it is the first one set,
+    the value is None: start refuses and doctor says why. Problems below the layer that wins are only listed."""
+    env = (os.environ.get(ENV_MAX_PARALLEL) or "").strip() or None  # set but empty counts as not set
+    if env:
+        with _quiet(ValueError):  # text that is not a whole number stays text: an unusable value
+            env = int(env)
+    layers = [(ly, v, None if v is None or usable_max_parallel(v) else
+               f"{ly} sets max_parallel {v!r}, not an integer from 1 to {MAX_PARALLEL_LIMIT}")
+              for ly, v in (("flag", flag), ("plan", plan.get("max_parallel")), ("env", env))]
+    for ly, path in (("user_config", user_config_path()),
+                     ("project_config", os.path.join(top or root, PROJECT_CONFIG))):
+        v, problem = read_config_file(path)
+        layers.append((ly, v, problem and f"{ly}: {problem}"))
+    layers.append(("default", MAX_PARALLEL, None))
+    layer, value, problem = next(x for x in layers if x[1] is not None or x[2])
+    return (None if problem else value), layer, [p for _, _, p in layers if p]
 
 
 class Task:
@@ -977,6 +965,14 @@ def cmd_start(a):
     plan = read_plan_file(a.plan)
     top = git_top(root)
     max_parallel, max_layer, config_problems = resolve_max_parallel(a.max_parallel, plan, root, top)
+    if max_parallel is None:  # the first layer that is set cannot be used; its problem is the first one listed
+        # the flag and the plan are the coordinator's own input; the other layers belong to the user's machine
+        mine = {"flag": "pass --max-parallel", "plan": "give the plan's max_parallel"}.get(max_layer)
+        raise Fail("plan_invalid" if max_layer == "plan" else "bad_input", config_problems[0], 2,
+                   "needs_fix" if mine else "needs_user",
+                   f"{mine} an integer from 1 to {MAX_PARALLEL_LIMIT}, or leave it out, then rerun start" if mine
+                   else "ask the user to fix or remove that setting, then rerun start; "
+                        f"python3 {shlex.quote(SCRIPT)} doctor --root {shlex.quote(root)} lists every layer")
     stamp = _dt.datetime.now().strftime("%Y%m%d")
     slug = re.sub(r"[^a-z0-9]+", "-", str(plan.get("question") or "task").lower()).strip("-")[:40] or "task"
     base = os.path.join(root, TASK_DIR, f"{stamp}-{slug}")
@@ -1478,15 +1474,15 @@ def cmd_resume(task, a):
 
 def cmd_doctor(a):
     root, top = os.path.realpath(a.root), git_top(os.path.realpath(a.root))
-    layers, problems = max_parallel_layers(a.max_parallel, {}, root, top)
-    layer, value = next((ly, v) for ly, v in layers if v is not None and usable_max_parallel(v))
+    value, layer, problems = resolve_max_parallel(a.max_parallel, {}, root, top)  # what a start here would get
     return {"max_parallel": value, "layer": layer,
             "layers": {"default": MAX_PARALLEL, "env": os.environ.get(ENV_MAX_PARALLEL),
                        "user_config": user_config_path(),
                        "project_config": os.path.join(top or root, PROJECT_CONFIG)},
             "git": {"root": root, "top": top, "worktrees": top is not None}, "cpus": os.cpu_count(),
             "problems": problems,
-            "next": "start --max-parallel N sets the task value; ad tune --max-parallel N --task <dir> "
+            "next": f"start refuses here until the {layer} setting is fixed or removed" if value is None else
+                    "start --max-parallel N sets the task value; ad tune --max-parallel N --task <dir> "
                     "changes it for the next round"}
 
 
