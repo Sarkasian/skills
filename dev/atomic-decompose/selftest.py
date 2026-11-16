@@ -586,7 +586,7 @@ def test_docs_name_real_commands():
     unprompted = {"start", "next", "status", "plan", "decide", "mark", "log"}
     check(unprompted <= used, f"[W13] SKILL.md names every command it must: {sorted(unprompted - used)}")
     check(len(skill) <= 6000, f"[W13] SKILL.md is at most 6,000 characters ({len(skill)})")
-    # cap raised 1,600 -> 1,750 for the max_parallel settings, doctor and tune (1,596 lines on 0.2.0, 1,710 on 0.3.0)
+    # cap raised 1,600 -> 1,750 for the max_parallel settings, doctor and tune (1,596 lines on 0.2.0, 1,718 on 0.3.0)
     check(len(open(dc.SCRIPT).read().split("\n")) <= 1750, "[W13] decompose.py is at most 1,750 lines")
     check(re.search(rf"^  version: {re.escape(dc.VERSION)}$", skill, re.M),
           f"[W13] SKILL.md's metadata.version is the script's VERSION, {dc.VERSION}")
