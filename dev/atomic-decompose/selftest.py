@@ -869,6 +869,40 @@ def test_max_parallel_config_chain():
           "[P4] two writer runs each get a worktree and a brief file that exists")
 
 
+def test_max_parallel_config_problems():
+    cfg = dc.user_config_path()
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(cfg)
+    root = repo()
+    proj = os.path.join(root, dc.PROJECT_CONFIG)
+    for path, text in ((proj, "{}"), (cfg, '{"note": "x"}')):
+        with open(path, "w") as f:
+            f.write(text)
+        _, out = start(root, [item("A", ["mod.py"])])
+        doc, _ = run("doctor", "--root", root)
+        check(out["max_parallel_layer"] == "default" and doc["layer"] == "default" and not doc["problems"],
+              f"[P6] a config file with no max_parallel sets nothing: {text}")
+        os.remove(path)
+    if getattr(os, "geteuid", lambda: 0)() != 0:  # root, and Windows, read a file whatever its mode
+        with open(proj, "w") as f:
+            f.write('{"max_parallel": 2}')
+        os.chmod(proj, 0)
+        _, out = start(root, [item("B", ["other.py"])])
+        doc, _ = run("doctor", "--root", root)
+        os.chmod(proj, 0o644)
+        os.remove(proj)
+        check(any(proj in p for p in out["config_problems"]) and any(proj in p for p in doc["problems"]),
+              "[P6] a config file that cannot be read is a named problem, not a crash")
+    for bad in ("--3", "\u00b2"):
+        with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: bad}):
+            _, err = run("start", "--root", root, "--statement", "s", "--plan",
+                         plan_file([item("C", ["README.md"])]), code=2)
+            doc, _ = run("doctor", "--root", root)
+            check(err.startswith("ERROR [") and any("env" in p for p in doc["problems"]),
+                  f"[P6] AD_MAX_PARALLEL that is not a number is refused, not a crash: {bad!r}")
+
+
 def main():
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

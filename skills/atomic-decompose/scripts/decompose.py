@@ -93,34 +93,39 @@ def user_config_path():
 
 
 def read_config_file(path):
-    """(config, problem); config is None when the file sets nothing usable."""
+    """(the file's max_parallel, problem). The value is None when there is no file, or the file sets none."""
     if not os.path.isfile(path):
         return None, None
     try:
-        data = json.load(open(path, encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except OSError as e:
+        return None, f"{path} cannot be read: {e.strerror}"
+    except ValueError:  # bad JSON and bad UTF-8 are both ValueErrors
         return None, f"{path} is not JSON"
     if not isinstance(data, dict):
         return None, f"{path} is not a JSON object"
-    if "max_parallel" in data and not usable_max_parallel(data["max_parallel"]):
+    value = data.get("max_parallel")
+    if value is not None and not usable_max_parallel(value):
         return None, f"{path} has no usable 'max_parallel' (want 1 to {MAX_PARALLEL_LIMIT})"
-    return data, None
+    return value, None
 
 
 def max_parallel_layers(flag, plan, root, top):
     """Candidate max_parallel settings in priority order as (layer, value); None sets nothing.
     problems names settings a start here would not be able to use."""
-    env_raw = os.environ.get(ENV_MAX_PARALLEL)
-    env_val = int(env_raw) if env_raw is not None and env_raw.strip().lstrip("-").isdigit() else env_raw
+    env_val = os.environ.get(ENV_MAX_PARALLEL)
+    if env_val is not None:
+        with _quiet(ValueError):  # text that is not a whole number stays text: an unusable value
+            env_val = int(env_val)
     layers = [("flag", flag), ("plan", plan.get("max_parallel")), ("env", env_val)]
     problems = [f"{ly} sets max_parallel {v}, not an integer from 1 to {MAX_PARALLEL_LIMIT}"
                 for ly, v in layers[:3] if v is not None and not usable_max_parallel(v)]
     for layer, path in (("user_config", user_config_path()),
                         ("project_config", os.path.join(top or root, PROJECT_CONFIG))):
-        cfg, problem = read_config_file(path)
+        value, problem = read_config_file(path)
         problems += [problem] if problem else []
-        if cfg is not None:
-            layers.append((layer, cfg["max_parallel"]))
+        layers.append((layer, value))
     layers.append(("default", MAX_PARALLEL))
     return layers, problems
 
