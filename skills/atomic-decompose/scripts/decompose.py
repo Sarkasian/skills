@@ -1474,7 +1474,10 @@ def cmd_resume(task, a):
 
 
 def cmd_doctor(a):
-    root, top = os.path.realpath(a.root), git_top(os.path.realpath(a.root))
+    root = os.path.realpath(a.root)
+    if not os.path.isdir(root):
+        raise Fail("bad_input", f"no folder {root}", 2)
+    top = git_top(root)
     value, layer, problems = resolve_max_parallel(a.max_parallel, {}, root, top)  # what a start here would get
     return {"max_parallel": value, "layer": layer,
             "layers": {"default": MAX_PARALLEL, "env": os.environ.get(ENV_MAX_PARALLEL),

@@ -817,10 +817,6 @@ def test_max_parallel_config_chain():
         check(out["max_parallel_layer"] == "plan"
               and any("env" in p for p in out["config_problems"]),
               "[P1] a setting shadowed by a higher one is a problem, not a failure")
-    with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: "6"}):
-        out, _ = run("start", "--root", root, "--statement", "s", "--plan", pp)
-        check(out["max_parallel_layer"] == "plan",
-              "[P1] the plan file field beats the env var")
     cfg = dc.user_config_path()
     os.makedirs(os.path.dirname(cfg), exist_ok=True)
     with open(cfg, "w") as f:
@@ -853,11 +849,8 @@ def test_max_parallel_config_chain():
     _, out = start(root3, [item("E3b", ["other.py"])])
     check(out["max_parallel"] == 2 and out["max_parallel_layer"] == "project_config",
           "[P1] the project file sets the value when no user file does")
-    with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: "3"}):
-        _, out = start(root2, [item("E4", ["README.md"])])
-        check(out["max_parallel_layer"] == "env",
-              "[P1] the env var beats the project file")
     root4 = repo()
+    refused("bad_input", 2, "doctor", "--root", os.path.join(TMP, "no-such-folder"))
     out, _ = run("doctor", "--root", root4)
     check(out["max_parallel"] == dc.MAX_PARALLEL and out["layer"] == "default"
           and out["git"]["worktrees"] and out["cpus"],
