@@ -747,9 +747,6 @@ def start_runs(task, st, groups):
             task.event("item_started", i, {"run": rid, "try": by[i]["tries"] + 1})
         st["runs"].append(run)
         run["brief"] = write_brief(task, st, run)
-        if st["mode"] == "delegate" and not use_worktrees:  # no worktrees, so parallel briefs would collide
-            run["brief"] += ("\nCap: do not launch these briefs in parallel outside a git worktree "
-                             f"(max_parallel={st['max_parallel']}). Launch one at a time in the plain tree.")
         runs.append(run)
     return runs
 

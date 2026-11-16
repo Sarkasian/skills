@@ -858,21 +858,15 @@ def test_max_parallel_config_chain():
     out, _ = run("next", "--task", t5)
     check(out["action"] == "dispatch" and len(out["runs"]) == 3,
           "[P3] tune raises the very next round to 3 executors")
-    root3 = repo()
-    t3, _ = start(root3, [item("H", [], check="read it"), item("I", [], check="read it")],
-                  "--max-parallel", "1", "--mode", "delegate")
-    out, _ = run("next", "--task", t3)
-    check(out["action"] == "dispatch" and len(out["runs"]) == 1
-          and all("do not launch these briefs in parallel" in r["prompt"] for r in out["runs"])
-          and all(r["worktree"] is None for r in state(t3)["runs"]),
-          "[P4] file-less briefs get the cap note: no worktrees, one at a time")
-    t4, _ = start(repo(), [item("J", ["mod.py"]), item("K", ["README.md"])],
-                  "--max-parallel", "2", "--mode", "delegate")
-    out, _ = run("next", "--task", t4)
+    t3, out = start(repo(), [item(x, [], check="read it") for x in ("H", "I", "I2")], "--mode", "delegate")
+    check(out["action"] == "dispatch" and len(out["runs"]) == 3
+          and all(r["worktree"] is None and os.path.isfile(r["brief"]) for r in state(t3)["runs"]),
+          "[P4] read-only runs go out together, and each run's brief is a file that exists")
+    t4, out = start(repo(), [item("J", ["mod.py"]), item("K", ["README.md"])],
+                    "--max-parallel", "2", "--mode", "delegate")
     check(out["action"] == "dispatch" and len(out["runs"]) == 2
-          and all("Cap" not in r["prompt"] for r in out["runs"])
-          and all(r["worktree"] for r in state(t4)["runs"]),
-          "[P4] worktree briefs get no cap note")
+          and all(r["worktree"] and os.path.isfile(r["brief"]) for r in state(t4)["runs"]),
+          "[P4] two writer runs each get a worktree and a brief file that exists")
 
 
 def main():
