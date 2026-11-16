@@ -842,12 +842,17 @@ def test_max_parallel_config_chain():
     check(out["max_parallel"] is None and out["layer"] == "user_config" and "refuses" in out["next"]
           and any(cfg in p for p in out["problems"]),
           "[P2] doctor says a start here would refuse the user file, and exits 0")
+    root3 = repo()
+    for path, value in ((cfg, 5), (os.path.join(root3, dc.PROJECT_CONFIG), 2)):
+        with open(path, "w") as f:
+            json.dump({"max_parallel": value}, f)
+    _, out = start(root3, [item("E3", ["mod.py"])])
+    check(out["max_parallel"] == 5 and out["max_parallel_layer"] == "user_config",
+          "[P1] the user file beats the project file")
     os.remove(cfg)
-    with open(os.path.join(root2, dc.PROJECT_CONFIG), "w") as f:
-        json.dump({"max_parallel": 2}, f)
-    _, out = start(root2, [item("E3", ["mod.py"])])
-    check(out["max_parallel_layer"] == "project_config",
-          "[P1] the project file beats the user file")
+    _, out = start(root3, [item("E3b", ["other.py"])])
+    check(out["max_parallel"] == 2 and out["max_parallel_layer"] == "project_config",
+          "[P1] the project file sets the value when no user file does")
     with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: "3"}):
         _, out = start(root2, [item("E4", ["README.md"])])
         check(out["max_parallel_layer"] == "env",
