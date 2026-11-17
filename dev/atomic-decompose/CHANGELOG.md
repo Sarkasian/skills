@@ -2,6 +2,33 @@
 
 SemVer. Major: rename, trigger-scope change, removed script/flag, config schema break. Minor: new optional config/reference, deprecation. Patch: wording fixes that pass evals.
 
+## 0.3.0 (2026-11-16)
+
+Not tagged. The number of runs that work at once is now a setting, where 0.2.0 had the fixed number 4.
+
+### Added
+
+- **`max_parallel` is set per task**, by the first of these that is set when `start` runs:
+  1. `start --max-parallel N`;
+  2. `max_parallel` in the plan file;
+  3. the `AD_MAX_PARALLEL` environment variable (empty counts as not set);
+  4. the user config file: `$XDG_CONFIG_HOME/atomic-decompose/config.json`, or `~/.config/atomic-decompose/config.json` when that variable is not set; on Windows, `%APPDATA%\atomic-decompose\config.json`;
+  5. the project config file: `.atomic-decompose.json` in the top folder of the git repository, or in `--root` when there is no repository;
+  6. the default, 4.
+
+  A config file is a JSON object such as `{"max_parallel": 2}`. `start` prints the value as `max_parallel` and where it came from as `max_parallel_layer`. The finish summary prints `max_parallel`.
+- **`doctor --root <folder>`** prints the value a `start` in that folder would get, the layer it comes from, both config file paths, whether the folder is in a git repository (parallel writers need worktrees), the CPU count, and every setting that cannot be used. It needs no task and changes nothing.
+- **`tune --max-parallel N --task <T>`** changes the value of a task that has started. The new value applies from the next round, and the runs already working are left as they are.
+
+### Changed
+
+- **`max_parallel` must be an integer from 1 to 64.** On 0.2.0, `start --max-parallel 0` crashed with an `IndexError`.
+- **`start` refuses when the first setting that is set cannot be used.** It does not fall through to a lower one. A setting cannot be used when its value is not an integer from 1 to 64, or when its config file is not JSON, is not a JSON object, or cannot be read. The error names the layer and, for a file, its path. Its code is `plan_invalid` for the plan's field and `bad_input` for the others. The environment variable and the two files are the user's to fix (`resolves: needs_user`). An unusable setting below the one that applies does not stop `start`: it is listed in `config_problems`. `doctor` reports a refusal as `max_parallel: null` with the layer, and still exits 0.
+- **`plan` refuses a plan file whose `max_parallel` is not the task's value** (code `plan_invalid`), and its `next:` line names `tune`. Before, `plan` ignored the field without a word. The settings are read once, at `start`, and `tune` is the one command that changes the value afterwards.
+- **The task's `plan.json` no longer carries each item's status.** The file was written once and went stale, and `plan` reads `"status": "pending"` as "retry this item". So a later `plan`, even one that only added an item, put failed items back to pending with their tries reset, and cleared blocked ones. In a plan file, `status` is now only an instruction (`"dropped"`, or `"pending"` to retry), and the `status` command shows the statuses. A `plan.json` written by an earlier build keeps its old statuses until `plan` rewrites it. `plan` also compares each open item with the file as a plan file is read, and leaves out the need that `block --question` gives an item. Before, that need (which the file does not have) and a goal that ends in a line break (which reading a plan file strips) each counted as an edit, so a `plan` that changed nothing about an item unblocked it without the user being asked, or reset a failed fix item. A real edit to an item blocked on a question still withdraws the question, which is how the `check_broken` recovery reruns the item.
+- **SKILL.md is 5,815 characters (it was 7,998); the selftest cap is 6,000 (it was 8,000).** The *Ask* and *Faults* sections and the four action bullets of *Run* are gone: each said what the script prints in the `next` of the action or error it belongs to. Three telemetry instructions are gone too: `log compaction` and `log tokens`, which nothing reads, and `log asked_again`, so weekly metric M-1 no longer counts a re-ask the coordinator reports about itself. New: `--max-parallel <N>` beside `--mode`, and a pointer to `--help`. The `--mode delegate` sentence now says "delegate the work" and "executors" where it said "sub-agents", so the file has one word for whoever does a run. The name and description are unchanged. The task and trigger evals were not rerun.
+- decompose.py is 1,722 lines; the selftest cap is 1,750 (it was 1,600).
+
 ## 0.2.0 (2026-11-12)
 
 Not tagged. A redesign of the unreleased build that followed 0.1.0 (git checkpoints, script-run checks, chains). Test runs showed that build made a small model slower and worse than the same model working alone, so the flow was cut down to what a run needs. It was built in several working iterations, numbered 0.2 to 0.4 while in progress. They ship as this one release, and their separate notes are not kept. It is a major change by the rules above, kept at 0.x.

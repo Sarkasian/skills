@@ -2,8 +2,9 @@
 """Runnable check: `python3 selftest.py` exits 0 when every assertion holds.
 
 Standard library only, plus `git`. Runs `skills/atomic-decompose/scripts/decompose.py` in-process against
-temporary git repositories with HOME pointed into a temporary folder, and `report.py` beside this file on
-sample evaluation runs and weekly records.
+temporary git repositories with HOME and the user config folder (XDG_CONFIG_HOME, APPDATA) pointed into a
+temporary folder and AD_MAX_PARALLEL cleared, and `report.py` beside this file on sample evaluation runs and
+weekly records.
 """
 from __future__ import annotations
 
@@ -24,6 +25,10 @@ import decompose as dc  # noqa: E402
 
 TMP = tempfile.mkdtemp(prefix="ad-selftest-")
 os.environ["HOME"] = TMP
+# the user config path reads these before HOME, and the machine's own max_parallel must not reach the tests
+os.environ["XDG_CONFIG_HOME"] = os.path.join(TMP, ".config")
+os.environ["APPDATA"] = os.path.join(TMP, "AppData")
+os.environ.pop(dc.ENV_MAX_PARALLEL, None)
 for k, v in {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
              "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_NOSYSTEM": "1"}.items():
     os.environ[k] = v
@@ -393,6 +398,21 @@ def test_task_checks_add_a_fix_item():
     fix = state(t)["items"][-1]
     check(out["action"] == "do_yourself" and fix["origin"] == "task_checks" and "mod.py" in fix["files"],
           "[W6] failing task checks after a run add a fix item over its files")
+    t, _ = start(repo(), [item("Mod", ["mod.py"], check_cmd=["true"])], check_cmd=("false",))  # it prints nothing
+    root, path = state(t)["root"], os.path.join(t, "plan.json")
+    append(os.path.join(root, "mod.py"), "#\n")
+    run("done", "1", "--task", t)
+    run("next", "--task", t)
+    for code in ("check_failed", "check_failed", "item_failed"):
+        append(os.path.join(root, "mod.py"), "#\n")
+        refused(code, 1, "done", "2", "--task", t)
+    plan = json.load(open(path))
+    plan["items"].append(item("C", ["README.md"], check_cmd=["true"]))
+    with open(path, "w") as f:
+        json.dump(plan, f)
+    out, _ = run("plan", "--task", t)
+    check(out["edited"] == [] and it(t, "2")["status"] == "failed" and it(t, "2")["goal"].endswith("\n"),
+          "[W2] a fix item whose goal a plan file reads back stripped is no edit: it stays failed")
 
 
 def test_delegate_single_run():
@@ -454,6 +474,7 @@ def test_plan_edit():
     run("done", "1", "--task", t)
     plan = json.load(open(os.path.join(t, "plan.json")))
     check([i["id"] for i in plan["items"]] == ["1", "2"], "[W2] the task's plan.json carries ids")
+    check(not any("status" in i for i in plan["items"]), "[W2] the task's plan.json carries no item status")
     plan["items"][1]["check_cmd"] = ["true"]
     plan["items"].append({"title": "C", "goal": "g", "covers": ["R1"], "files": ["other.py"], "check_cmd": ["true"]})
     with open(os.path.join(t, "plan.json"), "w") as f:
@@ -469,6 +490,51 @@ def test_plan_edit():
           "[W2] a partial plan adds items, maps its own ids in depends and keeps the items it leaves out")
     out, _ = run("plan", plan_file([{"id": "3", "status": "dropped"}]), "--task", t)
     check(out["dropped"] == ["3"], "[W2] an item is dropped by status dropped")
+
+
+def test_plan_leaves_failed_and_blocked_items():
+    root = repo()
+    t, _ = start(root, [item("Break", ["mod.py"]), item("Park", ["mod.py"], check_cmd=["true"]),
+                        item("Ask", ["mod.py"], check_cmd=["true"])])
+    path = os.path.join(t, "plan.json")
+    append(os.path.join(root, "mod.py"), "def base():\n    return 2\n")
+    for code in ("check_failed", "check_failed", "item_failed"):
+        refused(code, 1, "done", "1", "--task", t)
+    run("block", "2", "--approval", "delete mod.py", "--task", t)
+    run("block", "3", "--question", "Which title?", "--task", t)
+    plan = json.load(open(path))
+    plan["items"].append(item("C", ["README.md"], check_cmd=["true"]))
+    with open(path, "w") as f:
+        json.dump(plan, f)
+    out, _ = run("plan", "--task", t)  # before the next `next`: the task is still running
+    check(out["added"] == ["4"] and "1" not in out["edited"] and it(t, "1")["status"] == "failed"
+          and it(t, "1")["tries"] == 3,
+          "[W2] a plan that only adds an item leaves a failed item failed, with its tries, and does not list it")
+    check(it(t, "2")["status"] == "blocked" and it(t, "2")["block"]["text"] == "delete mod.py",
+          "[W2] a plan that only adds an item leaves a blocked item blocked, with its block")
+    ask = it(t, "3")  # `block --question` adds the need in the state alone: the file `start` wrote has none
+    check(out["edited"] == [] and ask["status"] == "blocked" and ask["needs"] == [ask["block"]["question"]],
+          "[W2] a plan that only adds an item leaves an item blocked on a question blocked, with its need")
+    plan = json.load(open(path))  # that plan rewrote the file from the state, so item 3 now lists the need
+    check(plan["items"][2]["needs"] == ask["needs"], "[W2] the rewritten plan.json lists the blocked item's need")
+    plan["items"].append(item("D", ["README.md"], check_cmd=["true"]))
+    with open(path, "w") as f:
+        json.dump(plan, f)
+    out, _ = run("plan", "--task", t)
+    check(out["edited"] == [] and it(t, "3")["status"] == "blocked",
+          "[W2] nor is the item unblocked when the file does list the need its block added")
+    plan = json.load(open(path))
+    plan["items"][0]["status"] = "pending"
+    plan["items"][2]["check_cmd"] = [TEST]  # the check_broken recovery: the coordinator fixes the check
+    with open(path, "w") as f:
+        json.dump(plan, f)
+    out, _ = run("plan", "--task", t)
+    check(out["edited"] == ["1", "3"] and out["added"] == [] and it(t, "1")["status"] == "pending"
+          and it(t, "1")["tries"] == 0,
+          "[W2] status pending in the plan file sets a failed item to pending with no tries used, as edited")
+    ask = it(t, "3")
+    check(ask["status"] == "pending" and ask["block"] is None and ask["needs"] == [],
+          "[W2] an edit to an item blocked on a question withdraws the question, so the item reruns without a stop")
 
 
 def test_decide_and_status():
@@ -548,8 +614,22 @@ def test_docs_name_real_commands():
     names = set(dc.COMMANDS) | {"start"}
     used = set(re.findall(r"`ad (\w+)", skill))
     check(used and used <= names, f"[W13] SKILL.md names only real commands: {sorted(used - names)}")
-    check(len(skill) <= 8000, f"[W13] SKILL.md is at most 8,000 characters ({len(skill)})")
-    check(len(open(dc.SCRIPT).read().split("\n")) <= 1600, "[W13] decompose.py is at most 1,600 lines")
+    # the commands no script output prompts; every other one is printed in full by the output that needs it
+    unprompted = {"start", "next", "status", "plan", "decide", "mark", "log"}
+    check(unprompted <= used, f"[W13] SKILL.md names every command it must: {sorted(unprompted - used)}")
+    check(len(skill) <= 6000, f"[W13] SKILL.md is at most 6,000 characters ({len(skill)})")
+    # cap raised 1,600 -> 1,750 for the max_parallel settings, doctor and tune (1,596 lines on 0.2.0, 1,722 on 0.3.0)
+    check(len(open(dc.SCRIPT).read().split("\n")) <= 1750, "[W13] decompose.py is at most 1,750 lines")
+    check(re.search(rf"^  version: {re.escape(dc.VERSION)}$", skill, re.M),
+          f"[W13] SKILL.md's metadata.version is the script's VERSION, {dc.VERSION}")
+    check(f"\n## {dc.VERSION} " in open(os.path.join(HERE, "CHANGELOG.md")).read(),
+          f"[W13] CHANGELOG.md has an entry for {dc.VERSION}")
+    count = len(dc.COMMANDS) + 2  # COMMANDS leaves out start and doctor, which run without a task
+    check(f"{count} commands" in open(os.path.join(HERE, "HOW-IT-WORKS.md")).read(),
+          f"[W13] HOW-IT-WORKS.md gives the number of commands, {count}")
+    readme = open(os.path.join(HERE, "..", "..", "README.md")).read()
+    check(dc.ENV_MAX_PARALLEL in readme and dc.PROJECT_CONFIG in readme,
+          "[W13] README.md names the max_parallel environment variable and the project config file")
 
 
 sys.path.insert(0, HERE)
@@ -765,6 +845,191 @@ def test_report_weekly():
     with open(marks_file, "w") as f:
         f.write("{")
     check("marks_unreadable" in report_run(*args, code=2)[1], "[API-12] a DM-10 file that is not JSON")
+
+
+def test_max_parallel_config_chain():
+    check(dc.user_config_path().startswith(TMP + os.sep) and dc.ENV_MAX_PARALLEL not in os.environ,
+          "[P5] the selftest's user config path is in its temporary folder and AD_MAX_PARALLEL is cleared")
+    root = repo()
+    t, out = start(root, [item("A", ["mod.py"])])
+    check(out["max_parallel"] == dc.MAX_PARALLEL and out["max_parallel_layer"] == "default"
+          and state(t)["max_parallel"] == dc.MAX_PARALLEL,
+          "[P1] with nothing set, the task gets the default and records it")
+    with open(os.path.join(root, dc.PROJECT_CONFIG), "w") as f:
+        json.dump({"max_parallel": 2}, f)
+    _, out = start(root, [item("B", ["other.py"])])
+    check(out["max_parallel"] == 2 and out["max_parallel_layer"] == "project_config",
+          "[P1] .atomic-decompose.json sets the task value")
+    with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: "3"}):
+        _, out = start(root, [item("C", ["README.md"])])
+        check(out["max_parallel_layer"] == "env", "[P1] AD_MAX_PARALLEL beats the project file")
+        _, out = start(root, [item("D", ["README.md"])], "--max-parallel", "1")
+        check(out["max_parallel"] == 1, "[P1] --max-parallel beats AD_MAX_PARALLEL")
+    pp = os.path.join(TMP, "plan-maxpar.json")
+    with open(pp, "w") as f:
+        json.dump({"question": "q", "requirements": ["r1"], "check_cmd": [TEST], "max_parallel": 2,
+                   "items": [item("E", ["README.md"])]}, f)
+    with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: "3"}):
+        out, _ = run("start", "--root", root, "--statement", "s", "--plan", pp)
+        check(out["max_parallel_layer"] == "plan", "[P1] the plan field beats the env")
+    plain = plan_file([item("E2", ["README.md"])])
+    for bad in ("banana", "0", "99"):
+        with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: bad}):
+            err = refused("bad_input", 2, "start", "--root", root, "--statement", "s", "--plan", plain)
+            check("env sets" in err and "resolves: needs_user" in err and "doctor --root" in err,
+                  f"[P1] an unusable AD_MAX_PARALLEL is the user's to fix, and doctor is named: {bad}")
+    err = refused("bad_input", 2, "start", "--root", root, "--statement", "s", "--plan", plain,
+                  "--max-parallel", "0")
+    check("flag sets" in err and "resolves: needs_fix" in err, "[P1] an unusable --max-parallel is refused")
+    bad_plan = os.path.join(TMP, "plan-maxpar-bad.json")
+    with open(pp) as f, open(bad_plan, "w") as g:
+        json.dump({**json.load(f), "max_parallel": 0}, g)
+    err = refused("plan_invalid", 2, "start", "--root", root, "--statement", "s", "--plan", bad_plan)
+    check("plan sets" in err and "resolves: needs_fix" in err, "[P1] an unusable plan max_parallel is refused")
+    with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: "banana"}):
+        out, _ = run("start", "--root", root, "--statement", "s", "--plan", pp)
+        check(out["max_parallel_layer"] == "plan"
+              and any("env" in p for p in out["config_problems"]),
+              "[P1] a setting shadowed by a higher one is a problem, not a failure")
+    cfg = dc.user_config_path()
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
+    with open(cfg, "w") as f:
+        json.dump({"max_parallel": 5}, f)
+    root2 = repo()
+    _, out = start(root2, [item("F", ["mod.py"])])
+    check(out["max_parallel"] == 5 and out["max_parallel_layer"] == "user_config",
+          "[P1] the user config file beats the default")
+    for text in ("{", "[]", '{"max_parallel": "1"}'):
+        with open(cfg, "w") as f:
+            f.write(text)
+        err = refused("bad_input", 2, "start", "--root", root2, "--statement", "s", "--plan", plain)
+        check("user_config: " + cfg in err and "resolves: needs_user" in err,
+              f"[P1] an unusable user file with nothing set above it refuses start, by layer and path: {text}")
+    _, out = start(root2, [item("G", ["other.py"])], "--max-parallel", "2")
+    check(out["max_parallel"] == 2 and any(cfg in p for p in out["config_problems"]),
+          "[P1] an unusable file below the setting that applies is listed, not fatal")
+    out, _ = run("doctor", "--root", root2)
+    check(out["max_parallel"] is None and out["layer"] == "user_config" and "refuses" in out["next"]
+          and any(cfg in p for p in out["problems"]),
+          "[P2] doctor says a start here would refuse the user file, and exits 0")
+    root3 = repo()
+    for path, value in ((cfg, 5), (os.path.join(root3, dc.PROJECT_CONFIG), 2)):
+        with open(path, "w") as f:
+            json.dump({"max_parallel": value}, f)
+    _, out = start(root3, [item("E3", ["mod.py"])])
+    check(out["max_parallel"] == 5 and out["max_parallel_layer"] == "user_config",
+          "[P1] the user file beats the project file")
+    os.remove(cfg)
+    _, out = start(root3, [item("E3b", ["other.py"])])
+    check(out["max_parallel"] == 2 and out["max_parallel_layer"] == "project_config",
+          "[P1] the project file sets the value when no user file does")
+    root4 = repo()
+    refused("bad_input", 2, "doctor", "--root", os.path.join(TMP, "no-such-folder"))
+    out, _ = run("doctor", "--root", root4)
+    check(out["max_parallel"] == dc.MAX_PARALLEL and out["layer"] == "default"
+          and out["git"]["worktrees"] and out["cpus"],
+          "[P2] doctor reports the applied setting, its layer, and git facts")
+    with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: "banana"}):
+        out, _ = run("doctor", "--root", root4)
+        check(out["max_parallel"] is None and out["layer"] == "env" and "refuses" in out["next"]
+              and any("env" in p for p in out["problems"]),
+              "[P2] doctor says a start here would refuse the env setting, and exits 0")
+        out, _ = run("doctor", "--root", root4, "--max-parallel", "2")
+        check(out["max_parallel"] == 2 and out["layer"] == "flag" and len(out["problems"]) == 1,
+              "[P2] doctor with a usable flag reports it, and only lists the env problem below it")
+    with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: " "}):
+        _, out = start(root4, [item("E5", ["mod.py"])])
+        check(out["max_parallel_layer"] == "default" and "config_problems" not in out,
+              "[P1] an empty AD_MAX_PARALLEL counts as not set")
+    out, _ = run("tune", "--max-parallel", "1", "--task", t)
+    check(out["max_parallel"] == 1 and state(t)["max_parallel"] == 1,
+          "[P3] tune sets the task value for the next round")
+    out, _ = run("tune", "--max-parallel", "9", "--task", t)
+    check(out["max_parallel"] == 9, "[P3] tune can raise above the chain value")
+    refused("bad_input", 2, "tune", "--max-parallel", "65", "--task", t)
+    refused("bad_input", 2, "tune", "--max-parallel", "banana", "--task", t)
+    writers = [item("L", ["mod.py"]), item("M", ["README.md"]), item("N", ["other.py"])]
+    t5, out = start(repo(), writers, "--max-parallel", "1", "--mode", "delegate")
+    check(out["action"] == "dispatch" and len(out["runs"]) == 1, "[P3] max_parallel 1 packs the writers into one run")
+    out, _ = run("tune", "--max-parallel", "3", "--task", t5)
+    check("once every executor" in out["next"], "[P3] with a run active, tune says to wait for its executors")
+    t6, out = start(repo(), writers, "--max-parallel", "1", "--mode", "delegate",
+                    questions=[{"type": "scope", "text": "Tabs?", "default": "no"}])
+    check(out["action"] == "ask", "[P3] a question round starts no run")
+    out, _ = run("tune", "--max-parallel", "3", "--task", t6)
+    check(out["next"].endswith(f"--task {t6}"), "[P3] with no run active, tune's next is the plain next command")
+    run("answer", "--defaults", "--task", t6)
+    out, _ = run("next", "--task", t6)
+    check(out["action"] == "dispatch" and len(out["runs"]) == 3 and state(t6)["max_parallel_layer"] == "tune"
+          and all(x["tries"] == 0 for x in state(t6)["items"]),
+          "[P3] tune before a round gives it 3 executors, records the layer, and charges no item a try")
+    t3, out = start(repo(), [item(x, [], check="read it") for x in ("H", "I", "I2")], "--mode", "delegate")
+    check(out["action"] == "dispatch" and len(out["runs"]) == 3
+          and all(r["worktree"] is None and os.path.isfile(r["brief"]) for r in state(t3)["runs"])
+          and all(r["prompt"].count("\n") == 0 for r in out["runs"]),
+          "[P4] read-only runs go out together; each brief is a file that exists and each prompt is one line")
+    t4, out = start(repo(), [item("J", ["mod.py"]), item("K", ["README.md"])],
+                    "--max-parallel", "2", "--mode", "delegate")
+    check(out["action"] == "dispatch" and len(out["runs"]) == 2
+          and all(r["worktree"] and os.path.isfile(r["brief"]) for r in state(t4)["runs"]),
+          "[P4] two writer runs each get a worktree and a brief file that exists")
+    t7, _ = start(repo(), [item("P", ["mod.py"])], "--max-parallel", "2")
+    with open(os.path.join(t7, "plan.json")) as f:
+        plan = json.load(f)
+    plan["items"].append(item("Q", ["other.py"]))
+
+    def plan_with(cap):  # a successful plan rewrites the file, so each step writes it again
+        with open(os.path.join(t7, "plan.json"), "w") as f:
+            json.dump({**plan, "max_parallel": cap}, f)
+    plan_with(7)
+    err = refused("plan_invalid", 2, "plan", "--task", t7)
+    check("tune --max-parallel" in err and state(t7)["max_parallel"] == 2 and len(state(t7)["items"]) == 1,
+          "[P5] plan refuses a max_parallel that is not the task's, names tune, and changes nothing")
+    plan_with(2)
+    out, _ = run("plan", "--task", t7)
+    check(out["added"] == ["2"] and state(t7)["max_parallel"] == 2,
+          "[P5] a plan file that carries the task's own max_parallel is applied")
+    run("tune", "--max-parallel", "5", "--task", t7)
+    plan_with(2)  # this file also adds item Q again, a second refusal: the error text must be the max_parallel one
+    err = refused("plan_invalid", 2, "plan", "--task", t7)
+    check("tune --max-parallel" in err and state(t7)["max_parallel"] == 5 and len(state(t7)["items"]) == 2,
+          "[P5] after tune, a plan file with the old value is refused and the tuned value stays")
+
+
+def test_max_parallel_config_problems():
+    cfg = dc.user_config_path()
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(cfg)
+    root = repo()
+    proj = os.path.join(root, dc.PROJECT_CONFIG)
+    for path, text in ((proj, "{}"), (cfg, '{"note": "x"}')):
+        with open(path, "w") as f:
+            f.write(text)
+        _, out = start(root, [item("A", ["mod.py"])])
+        doc, _ = run("doctor", "--root", root)
+        check(out["max_parallel_layer"] == "default" and doc["layer"] == "default" and not doc["problems"],
+              f"[P6] a config file with no max_parallel sets nothing: {text}")
+        os.remove(path)
+    if getattr(os, "geteuid", lambda: 0)() != 0:  # root, and Windows, read a file whatever its mode
+        with open(proj, "w") as f:
+            f.write('{"max_parallel": 2}')
+        os.chmod(proj, 0)
+        plain = plan_file([item("B", ["other.py"])])
+        err = refused("bad_input", 2, "start", "--root", root, "--statement", "s", "--plan", plain)
+        doc, _ = run("doctor", "--root", root)
+        os.chmod(proj, 0o644)
+        os.remove(proj)
+        check(f"project_config: {proj} cannot be read" in err and doc["layer"] == "project_config"
+              and doc["max_parallel"] is None and any(proj in p for p in doc["problems"]),
+              "[P6] a config file that cannot be read is a named problem, not a crash")
+    for bad in ("--3", "\u00b2"):
+        with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: bad}):
+            refused("bad_input", 2, "start", "--root", root, "--statement", "s", "--plan",
+                    plan_file([item("C", ["README.md"])]))
+            doc, _ = run("doctor", "--root", root)
+            check(doc["max_parallel"] is None and any("env" in p for p in doc["problems"]),
+                  f"[P6] AD_MAX_PARALLEL that is not a number is refused, not a crash: {bad!r}")
 
 
 def main():

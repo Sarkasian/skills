@@ -4,7 +4,7 @@ Read the section for the error code you got. Each section says who acts and what
 
 ## check_failed, item_failed
 
-These go to the executor. Read the log tail in the message and fix the work, then run `done` again. After 3 failed tries the item fails: its files go back to how they were, its last diff is saved under `<T>/patches/`, and work that depends on it fails too. Go on to your next item. The coordinator names failed items in the report, or retries one by editing it in `plan.json` and setting its `status` to `pending`, then running `plan` and `next`.
+These go to the executor. Read the log tail in the message and fix the work, then run `done` again. After 3 failed tries the item fails: its files go back to how they were, its last diff is saved under `<T>/patches/`, and work that depends on it fails too. Go on to your next item. The coordinator names failed items in the report, or retries one by editing it in `plan.json` and giving it `"status": "pending"`, then running `plan` and `next`.
 
 ## check_broken
 
