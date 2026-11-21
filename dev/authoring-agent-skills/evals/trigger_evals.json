@@ -1,0 +1,23 @@
+[
+  {"query": "Create a new agent skill for generating our release notes", "should_trigger": true},
+  {"query": "Turn this workflow we just did into a reusable SKILL.md", "should_trigger": true},
+  {"query": "Should this be an MCP server or a skill?", "should_trigger": true},
+  {"query": "My PDF skill is 900 lines, can you split it up properly?", "should_trigger": true},
+  {"query": "Package these three skills and the MCP config as a plugin for the team", "should_trigger": true},
+  {"query": "Write trigger evals for the architecture-reviewer skill", "should_trigger": true},
+  {"query": "Review this skill before we publish it to the marketplace", "should_trigger": true},
+  {"query": "The agent never picks up my changelog skill, fix the description", "should_trigger": true},
+  {"query": "How should I version and deprecate our internal skills?", "should_trigger": true},
+  {"query": "I want the steps from this session written down in a form the agent loads on its own next time", "should_trigger": true},
+  {"query": "We keep re-explaining our release checklist to the agent every week; package it up so it just knows", "should_trigger": true},
+  {"query": "Write a Python CLI that converts CSV to Parquet", "should_trigger": false},
+  {"query": "Write the README for this repo", "should_trigger": false},
+  {"query": "Review this pull request for bugs", "should_trigger": false},
+  {"query": "Add a cursor rule that we use tabs in Go files", "should_trigger": false},
+  {"query": "Build an MCP server in TypeScript for our billing API", "should_trigger": false},
+  {"query": "Use the architecture-reviewer skill on this repo", "should_trigger": false},
+  {"query": "Write a PRD for the skills marketplace feature", "should_trigger": false},
+  {"query": "Explain how LangGraph subgraphs work", "should_trigger": false},
+  {"query": "Improve my skills as a Python developer", "should_trigger": false},
+  {"query": "Document the steps from this session in our wiki", "should_trigger": false}
+]

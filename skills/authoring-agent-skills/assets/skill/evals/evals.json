@@ -1,0 +1,15 @@
+{
+  "skill_name": "{{name}}",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "TODO realistic prompt drawn from a real failure",
+      "expected_output": "TODO",
+      "files": [],
+      "expectations": [
+        "TODO checkable outcome (prefer a file/state check over wording)",
+        "TODO the validator script ran before output was written"
+      ]
+    }
+  ]
+}

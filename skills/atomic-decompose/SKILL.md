@@ -1,9 +1,9 @@
 ---
 name: atomic-decompose
 description: "Plans a big task as small work items, asks every scope or user-only question once with a default, then runs the items (in parallel where they touch different files) from saved state that survives compaction. Use when a task is ambiguous, has several parts, or needs research, planning or delegation, or to resume a task saved under .atomic-decompose/. Not for one edit, fact or command."
+license: MIT
 metadata:
   version: 0.3.0
-  owner: pauln
 ---
 # Atomic Decompose
 

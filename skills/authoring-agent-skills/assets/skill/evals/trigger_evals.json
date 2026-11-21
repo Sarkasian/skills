@@ -1,0 +1,6 @@
+[
+  {"query": "TODO realistic request that SHOULD use the skill (explicit)", "should_trigger": true},
+  {"query": "TODO request that should use it without naming it (implicit)", "should_trigger": true},
+  {"query": "TODO near-miss: same domain, different task", "should_trigger": false},
+  {"query": "TODO near-miss: overlaps a sibling skill", "should_trigger": false}
+]

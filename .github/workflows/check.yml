@@ -1,0 +1,21 @@
+name: check
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Selftests
+        run: |
+          for t in dev/*/selftest.py; do echo "== $t"; python3 "$t"; done
+      - name: Lint every skill (errors fail, warnings are printed)
+        run: |
+          for s in skills/*/; do
+            name=$(basename "$s"); echo "== $name"
+            python3 skills/authoring-agent-skills/scripts/lint_skill.py "$s" --portable --evals-dir "dev/$name/evals"
+          done
