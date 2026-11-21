@@ -1,0 +1,25 @@
+---
+name: {{name}}
+description: "{{description}}"
+metadata:
+  version: 0.1.0
+  owner: TODO
+---
+# {{title}}
+
+Copy this checklist and tick it off:
+- [ ] 1. TODO first step. Run `python3 scripts/TODO.py --help` for flags.
+- [ ] 2. Validate: `python3 scripts/validate.py out/plan.json` (exit 0 required; fix only the listed items, max 3 attempts)
+- [ ] 3. Apply / produce output using the template in `assets/`
+- [ ] 4. Verify end to end before reporting done
+
+Stop and ask the user if: validation fails 3 times, a step is destructive and not in the approved plan, or required input is missing.
+
+## Gotchas
+- TODO: facts the model gets wrong without this skill (and only those).
+
+## Only if needed
+- TODO condition → read `references/TODO.md`
+
+## State
+Write progress to `out/progress.md` after each step; on resume, read it first.

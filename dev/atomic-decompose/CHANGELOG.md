@@ -2,6 +2,10 @@
 
 SemVer. Major: rename, trigger-scope change, removed script/flag, config schema break. Minor: new optional config/reference, deprecation. Patch: wording fixes that pass evals.
 
+## Unreleased
+
+- SKILL.md frontmatter: `license: MIT` added, `metadata.owner` removed. No change in behaviour.
+
 ## 0.3.0 (2026-11-16)
 
 Not tagged. The number of runs that work at once is now a setting, where 0.2.0 had the fixed number 4.

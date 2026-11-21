@@ -1,0 +1,65 @@
+{
+  "skill_name": "authoring-agent-skills",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Make a skill that lets the agent query our Jira with my API token and summarise sprint risk.",
+      "expected_output": "Recommends an MCP server (auth + live data) paired with a thin skill; token never in the skill",
+      "files": [],
+      "expectations": [
+        "Decision names an MCP server (or existing Jira MCP) for auth/live data",
+        "No API token or secret appears in any created SKILL.md",
+        "lint_skill.py exits 0 on the created skill"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Create a deploy skill that supports AWS, GCP and Azure.",
+      "expected_output": "One skill with references per provider, user-invoked only",
+      "files": [],
+      "expectations": [
+        "Exactly one new skill directory is created, with references/aws.md, references/gcp.md, references/azure.md (or equivalent)",
+        "The skill is user-invoked only on each target host, using that host's own switch, and the report names where the switch was looked up or marks it unverified",
+        "Destructive steps go through a validate script before apply"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Review the changelog-writer skill in .agents/skills/ before we share it with other teams.",
+      "expected_output": "Lint run first; findings reported against the rules, including the planted defects; trigger/task evals proposed since it has none",
+      "files": [
+        "evals/files/fixture-skills/changelog-writer/"
+      ],
+      "expectations": [
+        "lint_skill.py was run on the skill before any edit",
+        "Report flags the missing evals/evals.json and evals/trigger_evals.json",
+        "Report flags the interactive prompt in scripts/collect.py",
+        "Report flags that scripts/format_entries.py and references/style.md do not exist",
+        "Every reported issue cites a concrete file/line or lint message"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Add a rule that we always run ruff before committing.",
+      "expected_output": "Recommends a hook or always-on rule, not a skill, and stops",
+      "files": [],
+      "expectations": [
+        "No new skill directory is created",
+        "Response recommends an always-on rule or AGENTS.md entry",
+        "Creates or recommends an enforcement mechanism (git/agent hook), not only an instruction, because 'always' means it must happen every time"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Create a plain skill (no plugin) that formats our release notes. Each team needs to set its own heading style and the maximum number of bullets, and I want my own default on my machine.",
+      "expected_output": "A skill whose script resolves the two settings from layered config outside the skill folder",
+      "files": [],
+      "expectations": [
+        "SKILL.md frontmatter holds no setting values",
+        "A script reads the settings from files outside the installed skill folder, with a project file and a user file, and a flag or environment variable that overrides both",
+        "An unusable value produces an error naming the file and the field; the script does not fall back to the default silently",
+        "lint_skill.py exits 0 on the created skill"
+      ]
+    }
+  ]
+}
