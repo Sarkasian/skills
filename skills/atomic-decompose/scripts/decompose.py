@@ -50,7 +50,7 @@ TASK_DIR = ".atomic-decompose"
 SCRIPT = os.path.abspath(__file__)
 LOG_EVENTS = ("compaction", "asked_again", "wrong_engagement", "tokens")
 QUESTION_TYPES = ("scope", "user_only", "confirm")
-SOURCES = ("user", "default_accepted", "default_unconfirmed")
+SOURCES = ("user", "default_accepted", "default_unconfirmed", "system")
 
 
 class Fail(Exception):
@@ -788,7 +788,11 @@ def write_brief(task, st, run):
         if it["check"]:
             lines.append("Judged by: " + "; ".join(it["check"]))
         for note in it["notes"]:
-            lines.append(f"Note: {note}")
+            if isinstance(note, dict):
+                source_label = f" [from {note.get('source', 'unknown')}]"
+                lines.append(f"Note{source_label}: {note['text']}")
+            else:
+                lines.append(f"Note [error recovery]: {note}")
         lines.append(f"Done: {done(it['id'])}")
     path = os.path.join(task.dir, "briefs", f"{run['id']}.md")
     for d in ("briefs", "results"):
@@ -1235,6 +1239,29 @@ def cmd_answer(task, a):
     return locked(task, go)
 
 
+def cmd_annotate(task, a):
+    def go(st):
+        by = items_by_id(st)
+        it = by.get(a.item)
+        if it is None:
+            raise Fail("bad_input", f"no item {a.item}; items are {', '.join(by) or 'none'}", 2)
+        if a.note is None and not a.list:
+            raise Fail("bad_input", "give --note or --list", 2)
+        if a.note is not None:
+            entry = {"text": a.note, "source": a.source or "user", "at": _now()}
+            it["notes"].append(entry)
+            task.event("annotated", a.item, {"note": a.note, "source": a.source or "user"})
+            task.save(st)
+            return {"id": a.item, "note_added": True, "next": cmd_line(task, "plan")}
+        else:
+            notes = it.get("notes", [])
+            out = []
+            for n in notes:
+                out.append({"text": n["text"], "source": n.get("source", "unknown"), "at": n.get("at", "")})
+            return {"id": a.item, "notes": out, "next": cmd_line(task, "next")}
+    return locked(task, go)
+
+
 def cmd_done(task, a):
     st = task.load()
     it = items_by_id(st).get(a.id)
@@ -1642,6 +1669,12 @@ def build_parser():
     s.add_argument("--text")
     s.add_argument("--source", choices=SOURCES, default="user")
     s.add_argument("--defaults", action="store_true")
+    s = cmd("annotate", "Add a note to an item (e.g. research direction, user feedback). "
+                         "The note is written into the next executor's brief.")
+    s.add_argument("--item", required=True, help="the item id to annotate")
+    s.add_argument("--note", help="the note text to add")
+    s.add_argument("--source", choices=SOURCES, default="user")
+    s.add_argument("--list", action="store_true", help="list existing notes on the item")
     cmd("next", "Land finished runs, run the task checks, and print the next action.")
     s = cmd("done", "Executor: run an item's checks and commit it.")
     s.add_argument("id")
@@ -1687,8 +1720,9 @@ def build_parser():
 
 COMMANDS = {"next": cmd_next, "plan": cmd_plan, "answer": cmd_answer, "done": cmd_done, "block": cmd_block,
             "decide": cmd_decide, "status": cmd_status, "resume": cmd_resume, "stop": cmd_stop,
-            "finish": cmd_finish, "mark": cmd_mark, "log": cmd_log, "tune": cmd_tune}
-ANY_STATUS = {"status", "answer", "resume", "stop", "log", "mark", "finish", "next", "done", "block"}
+            "finish": cmd_finish, "mark": cmd_mark, "log": cmd_log, "tune": cmd_tune,
+            "annotate": cmd_annotate}
+ANY_STATUS = {"status", "answer", "resume", "stop", "log", "mark", "finish", "next", "done", "block", "annotate"}
 
 
 def run(argv):
