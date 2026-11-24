@@ -53,12 +53,10 @@ QUESTION_TYPES = ("scope", "user_only", "confirm")
 SOURCES = ("user", "default_accepted", "default_unconfirmed")
 ANNOTATE_SOURCES = SOURCES + ("system",)
 
-
 class Fail(Exception):
     def __init__(self, code, message, exit_code=2, resolves="needs_fix", nxt=""):
         super().__init__(message)
         self.code, self.message, self.exit_code, self.resolves, self.nxt = code, message, exit_code, resolves, nxt
-
 
 class Parser(argparse.ArgumentParser):
     def error(self, message):
@@ -1247,12 +1245,18 @@ def cmd_annotate(task, a):
             raise Fail("bad_input", f"no item {a.item}; items are {', '.join(by) or 'none'}", 2)
         if a.note is None and not a.list:
             raise Fail("bad_input", "give --note or --list", 2)
+        if a.note is not None and not a.note.strip():
+            raise Fail("bad_input", "--note must not be empty", 2)
+        if a.note is not None and a.note.strip().startswith("#"):
+            raise Fail("bad_input", "--note must not start with #", 2)
+        if len(a.note) > 5000:
+            raise Fail("bad_input", f"--note must be under 5000 characters ({len(a.note)} found)", 2)
         if a.note is not None:
             entry = {"text": a.note, "source": a.source, "at": _now()}
             it["notes"].append(entry)
             task.event("annotated", a.item, {"note": a.note, "source": a.source})
             task.save(st)
-            return {"id": a.item, "note_added": True, "next": cmd_line(task, "next")}
+            return {"id": a.item, "note_added": True, "note": a.note, "next": f"read the note above, then {cmd_line(task, 'next')}"}
         else:
             notes = it.get("notes", [])
             out = []
@@ -1633,7 +1637,6 @@ def cmd_log(task, a):
     except ValueError as e:
         raise Fail("bad_input", f"--data is not JSON: {e}", 2)
 
-
 # ---------------------------------------------------------------- entry
 
 def build_parser():
@@ -1647,18 +1650,15 @@ def build_parser():
         return s
     s = cmd("start", "Create a task from a plan file; prints the questions to ask, or the first action.", task=False)
     s.add_argument("--plan", required=True, help="plan JSON file, or - for stdin (SKILL.md shows the format)")
-    s.add_argument("--statement", required=True, help="the user's request, verbatim")
-    s.add_argument("--root", default=".", help="the folder the items change, where their file paths start (default: the current folder)")
+    s.add_argument("--statement", required=True, help="the user's request")
+    s.add_argument("--root", default=".", help="root folder for item files (default: current folder)")
     s.add_argument("--new-files", action="store_true")
     s.add_argument("--mode", choices=("auto", "delegate", "main_session"), default="auto",
-                   help="auto: one run is done in the main session, more go to executors; delegate: always "
-                        "executors; main_session: everything in the main session")
+                   help="auto: one run in main, rest to executors; delegate: all executors; main_session: all main")
     s.add_argument("--max-parallel", type=int, default=None,
-                   help="most runs at once; the task value is the first setting that applies: this flag, "
-                        "the plan file's max_parallel, AD_MAX_PARALLEL, the user config file, "
-                        f"{PROJECT_CONFIG} in the git top, {MAX_PARALLEL}")
+                   help="max runs; task value = this flag, plan file, env, user config, project config, or default")
     s.add_argument("--review", choices=("auto", "always", "never"), default="auto",
-                   help="auto: review the work that executors did, not the coordinator's own")
+                   help="auto: review executor work only")
     s = cmd("plan", "Apply an edited plan file (default: the task's plan.json) to the items not started.")
     s.add_argument("file", nargs="?")
     s = cmd("answer", "Record an answer; --defaults accepts every open question's default.")
