@@ -1603,7 +1603,6 @@ def summary(task, st):
                      "tokens": tokens[-1] if tokens else None},
             "next": "write the report (answer first); mark after the user replies"}
 
-
 def cmd_mark(task, a):
     def go(st):
         if st["status"] != "complete":
@@ -1649,9 +1648,8 @@ def build_parser():
     s = cmd("start", "Create a task from a plan file; prints the questions to ask, or the first action.", task=False)
     s.add_argument("--plan", required=True, help="plan JSON file, or - for stdin (SKILL.md shows the format)")
     s.add_argument("--statement", required=True, help="the user's request, verbatim")
-    s.add_argument("--root", default=".", help="the folder the items change, where their file paths start "
-                                               "(default: the current folder)")
-    s.add_argument("--new-files", action="store_true", help="every planned file is new")
+    s.add_argument("--root", default=".", help="the folder the items change, where their file paths start (default: the current folder)")
+    s.add_argument("--new-files", action="store_true")
     s.add_argument("--mode", choices=("auto", "delegate", "main_session"), default="auto",
                    help="auto: one run is done in the main session, more go to executors; delegate: always "
                         "executors; main_session: everything in the main session")
@@ -1666,6 +1664,7 @@ def build_parser():
     s = cmd("answer", "Record an answer; --defaults accepts every open question's default.")
     s.add_argument("--id")
     s.add_argument("--text")
+    s.add_argument("--source", choices=SOURCES, default="user")
     s.add_argument("--defaults", action="store_true")
     s = cmd("annotate", "Add a note to an item (research direction, user feedback). Flows into executor's brief.")
     s.add_argument("--item", required=True)
