@@ -42,10 +42,11 @@ Then run `ad start --root <the repository or folder the request names; file path
 
 ## 2. Run
 
-`start` prints the first action, and `ad next --task <T>` prints each one after it. Do what each action's `next` says, until the action is `report`. Two commands are yours to run unprompted:
+`start` prints the first action, and `ad next --task <T>` prints each one after it. Do what each action's `next` says, until the action is `report`. Three commands are yours to run unprompted:
 
 - **The work changes** (a discovery, or the user rescopes): edit `<T>/plan.json`, then run `ad plan --task <T>`. It adds new items and edits items that have not started. To drop one, give it `"status": "dropped"`.
 - **A real choice between options**: `ad decide --question "<choice>" --chosen "<option>" --reject "<option>::<why it lost>" --criteria <Q-ids> --task <T>`, with `--because "<evidence>"` when no question holds the criteria.
+- **New direction for an item not yet finished**: `ad annotate --item <id> --note "<direction>" --task <T>`. Its next brief carries the note. A running item reads it only on a retry.
 
 ## 3. Report
 

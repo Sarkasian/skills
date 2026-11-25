@@ -788,7 +788,7 @@ def write_brief(task, st, run):
         if it["check"]:
             lines.append("Judged by: " + "; ".join(it["check"]))
         for note in it["notes"]:
-            lines.append(f"Note: {note}")
+            lines.append(f"Note [from {note['source']}]: {note['text']}" if isinstance(note, dict) else f"Note: {note}")
         lines.append(f"Done: {done(it['id'])}")
     path = os.path.join(task.dir, "briefs", f"{run['id']}.md")
     for d in ("briefs", "results"):
@@ -1235,6 +1235,27 @@ def cmd_answer(task, a):
     return locked(task, go)
 
 
+def cmd_annotate(task, a):
+    def go(st):
+        it = items_by_id(st).get(a.item)
+        if it is None:
+            raise Fail("bad_input", f"no item {a.item}; items are {', '.join(items_by_id(st)) or 'none'}", 2)
+        if a.note is None:  # the script's own notes are plain strings
+            return {"id": it["id"], "status": it["status"], "next": cmd_line(task, "next"),
+                    "notes": [n if isinstance(n, dict) else {"text": n, "source": "script"} for n in it["notes"]]}
+        note = " ".join(a.note.split())  # one line, so that a note cannot pass for another line of the brief
+        if not 0 < len(note) <= 5000:
+            raise Fail("bad_input", "--note must have 1 to 5,000 characters", 2)
+        if it["status"] in ("done", "dropped"):
+            raise Fail("bad_input", f"item {a.item} is {it['status']}, so no executor would read the note", 2)
+        it["notes"].append({"text": note, "source": a.source, "at": _now()})
+        task.event("annotated", it["id"], {"note": note, "source": a.source})
+        task.save(st)
+        return {"id": it["id"], "note_added": True, "next": cmd_line(task, "next"), **(
+            {"warning": "the item is running, so only a retry of it reads the note"} if it["status"] == "running" else {})}
+    return locked(task, go)
+
+
 def cmd_done(task, a):
     st = task.load()
     it = items_by_id(st).get(a.id)
@@ -1642,6 +1663,12 @@ def build_parser():
     s.add_argument("--text")
     s.add_argument("--source", choices=SOURCES, default="user")
     s.add_argument("--defaults", action="store_true")
+    s = cmd("annotate", "Add a note to an open item, or list its notes; the item's next brief carries its notes.")
+    s.add_argument("--item", required=True, help="the item id")
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--note", help="the direction for the item's next executor; kept as one line")
+    g.add_argument("--list", action="store_true", help="print the item's notes")
+    s.add_argument("--source", choices=("user", "system"), default="user", help="who the note comes from")
     cmd("next", "Land finished runs, run the task checks, and print the next action.")
     s = cmd("done", "Executor: run an item's checks and commit it.")
     s.add_argument("id")
@@ -1687,8 +1714,8 @@ def build_parser():
 
 COMMANDS = {"next": cmd_next, "plan": cmd_plan, "answer": cmd_answer, "done": cmd_done, "block": cmd_block,
             "decide": cmd_decide, "status": cmd_status, "resume": cmd_resume, "stop": cmd_stop,
-            "finish": cmd_finish, "mark": cmd_mark, "log": cmd_log, "tune": cmd_tune}
-ANY_STATUS = {"status", "answer", "resume", "stop", "log", "mark", "finish", "next", "done", "block"}
+            "finish": cmd_finish, "mark": cmd_mark, "log": cmd_log, "tune": cmd_tune, "annotate": cmd_annotate}
+ANY_STATUS = {"status", "answer", "resume", "stop", "log", "mark", "finish", "next", "done", "block", "annotate"}
 
 
 def run(argv):
