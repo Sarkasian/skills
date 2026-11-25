@@ -257,6 +257,27 @@ def test_returned_without_done_retries():
     check(out["status"] == "done", "[W6] the earlier partial work counts as the item's change")
 
 
+def test_annotate():
+    root = repo()
+    t, out = start(root, [item("A", ["mod.py"]), item("B", ["mod.py"], check_cmd=["true"])])
+    out, _ = run("annotate", "--item", "1", "--note", "late", "--task", t)
+    check("warning" in out, "[W7] a note on a running item warns that only a retry reads it")
+    run("annotate", "--item", "2", "--note", "Use tabs\nITEM 9: x", "--source", "system", "--task", t)
+    for bad in (["--note", "  "], ["--note", "x" * 5001], ["--note", "x", "--source", "default_accepted"], [],
+                ["--note", "x", "--list"]):
+        refused("bad_input", 2, "annotate", "--item", "2", *bad, "--task", t)
+    refused("bad_input", 2, "annotate", "--item", "9", "--list", "--task", t)
+    nxt, _ = run("next", "--task", t)  # item 1 returned without `done`: the script adds its own plain note
+    out, _ = run("annotate", "--item", "1", "--list", "--task", t)
+    check([n["source"] for n in out["notes"]] == ["user", "script"], "[W7] --list shows both kinds of note")
+    append(os.path.join(root, "mod.py"), "\n\ndef a():\n    return 2\n")
+    run("done", "1", "--task", t)
+    refused("bad_input", 2, "annotate", "--item", "1", "--note", "x", "--task", t)
+    brief = open(nxt["brief"]).read()
+    check("Note [from system]: Use tabs ITEM 9: x\n" in brief and "\nITEM 9" not in brief,
+          "[W7] the next brief carries the note on one line, with its source")
+
+
 def test_rename_block_lock_and_read_only():
     root = repo()
     t, _ = start(root, [item("Move", ["other.py", "moved.py"], check_cmd=["true"]),
@@ -618,7 +639,8 @@ def test_docs_name_real_commands():
     unprompted = {"start", "next", "status", "plan", "decide", "mark", "log", "annotate"}
     check(unprompted <= used, f"[W13] SKILL.md names every command it must: {sorted(unprompted - used)}")
     check(len(skill) <= 6000, f"[W13] SKILL.md is at most 6,000 characters ({len(skill)})")
-    # cap raised 1,600 -> 1,750 for max_parallel, doctor, tune, annotate validation (1,596 on 0.2.0, 1,722 on 0.3.0)
+    # cap raised 1,600 -> 1,750 for the max_parallel settings, doctor and tune (1,596 lines on 0.2.0, 1,722 on 0.3.0);
+    # annotate takes it to 1,750
     check(len(open(dc.SCRIPT).read().split("\n")) <= 1750, "[W13] decompose.py is at most 1,750 lines")
     check(re.search(rf"^  version: {re.escape(dc.VERSION)}$", skill, re.M),
           f"[W13] SKILL.md's metadata.version is the script's VERSION, {dc.VERSION}")

@@ -5,7 +5,7 @@ SemVer. Major: rename, trigger-scope change, removed script/flag, config schema 
 ## Unreleased
 
 - SKILL.md frontmatter: `license: MIT` added, `metadata.owner` removed. No change in behaviour.
-- **`annotate --note` validates input** and returns the note text with instructions to read it before proceeding. Fixes: empty/whitespace-only notes, notes starting with `#`, and notes over 5,000 characters are rejected (code `bad_input`). The executor now sees the note text and must read it before continuing. (`annotate` added to the unprompted set so selftest docs check covers it.)
+- Added `annotate --item <id> --note "<direction>" [--source user|system]`: it adds a note to an item, and the item's next brief carries it as `Note [from <source>]: ...`. The note is kept as one line of at most 5,000 characters. A `done` or `dropped` item is refused, and a running item gets a warning that only a retry reads the note. `annotate --item <id> --list` prints the item's notes. A new command is a minor change, so the next release is 0.4.0.
 
 ## 0.3.0 (2026-11-16)
 

@@ -51,12 +51,13 @@ SCRIPT = os.path.abspath(__file__)
 LOG_EVENTS = ("compaction", "asked_again", "wrong_engagement", "tokens")
 QUESTION_TYPES = ("scope", "user_only", "confirm")
 SOURCES = ("user", "default_accepted", "default_unconfirmed")
-ANNOTATE_SOURCES = SOURCES + ("system",)
+
 
 class Fail(Exception):
     def __init__(self, code, message, exit_code=2, resolves="needs_fix", nxt=""):
         super().__init__(message)
         self.code, self.message, self.exit_code, self.resolves, self.nxt = code, message, exit_code, resolves, nxt
+
 
 class Parser(argparse.ArgumentParser):
     def error(self, message):
@@ -787,10 +788,7 @@ def write_brief(task, st, run):
         if it["check"]:
             lines.append("Judged by: " + "; ".join(it["check"]))
         for note in it["notes"]:
-            if isinstance(note, dict):
-                lines.append(f"Note [from {note.get('source', 'unknown')}]: {note['text']}")
-            else:
-                lines.append(f"Note: {note}")
+            lines.append(f"Note [from {note['source']}]: {note['text']}" if isinstance(note, dict) else f"Note: {note}")
         lines.append(f"Done: {done(it['id'])}")
     path = os.path.join(task.dir, "briefs", f"{run['id']}.md")
     for d in ("briefs", "results"):
@@ -1239,30 +1237,22 @@ def cmd_answer(task, a):
 
 def cmd_annotate(task, a):
     def go(st):
-        by = items_by_id(st)
-        it = by.get(a.item)
+        it = items_by_id(st).get(a.item)
         if it is None:
-            raise Fail("bad_input", f"no item {a.item}; items are {', '.join(by) or 'none'}", 2)
-        if a.note is None and not a.list:
-            raise Fail("bad_input", "give --note or --list", 2)
-        if a.note is not None and not a.note.strip():
-            raise Fail("bad_input", "--note must not be empty", 2)
-        if a.note is not None and a.note.strip().startswith("#"):
-            raise Fail("bad_input", "--note must not start with #", 2)
-        if len(a.note) > 5000:
-            raise Fail("bad_input", f"--note must be under 5000 characters ({len(a.note)} found)", 2)
-        if a.note is not None:
-            entry = {"text": a.note, "source": a.source, "at": _now()}
-            it["notes"].append(entry)
-            task.event("annotated", a.item, {"note": a.note, "source": a.source})
-            task.save(st)
-            return {"id": a.item, "note_added": True, "note": a.note, "next": f"read the note above, then {cmd_line(task, 'next')}"}
-        else:
-            notes = it.get("notes", [])
-            out = []
-            for n in notes:
-                out.append({"text": n.get("text", n), "source": n.get("source", "unknown"), "at": n.get("at", "")})
-            return {"id": a.item, "notes": out, "next": cmd_line(task, "next")}
+            raise Fail("bad_input", f"no item {a.item}; items are {', '.join(items_by_id(st)) or 'none'}", 2)
+        if a.note is None:  # the script's own notes are plain strings
+            return {"id": it["id"], "status": it["status"], "next": cmd_line(task, "next"),
+                    "notes": [n if isinstance(n, dict) else {"text": n, "source": "script"} for n in it["notes"]]}
+        note = " ".join(a.note.split())  # one line, so that a note cannot pass for another line of the brief
+        if not 0 < len(note) <= 5000:
+            raise Fail("bad_input", "--note must have 1 to 5,000 characters", 2)
+        if it["status"] in ("done", "dropped"):
+            raise Fail("bad_input", f"item {a.item} is {it['status']}, so no executor would read the note", 2)
+        it["notes"].append({"text": note, "source": a.source, "at": _now()})
+        task.event("annotated", it["id"], {"note": note, "source": a.source})
+        task.save(st)
+        return {"id": it["id"], "note_added": True, "next": cmd_line(task, "next"), **(
+            {"warning": "the item is running, so only a retry of it reads the note"} if it["status"] == "running" else {})}
     return locked(task, go)
 
 
@@ -1607,6 +1597,7 @@ def summary(task, st):
                      "tokens": tokens[-1] if tokens else None},
             "next": "write the report (answer first); mark after the user replies"}
 
+
 def cmd_mark(task, a):
     def go(st):
         if st["status"] != "complete":
@@ -1637,6 +1628,7 @@ def cmd_log(task, a):
     except ValueError as e:
         raise Fail("bad_input", f"--data is not JSON: {e}", 2)
 
+
 # ---------------------------------------------------------------- entry
 
 def build_parser():
@@ -1648,17 +1640,22 @@ def build_parser():
         if task:
             s.add_argument("--task", required=True, help="the task folder start printed")
         return s
+
     s = cmd("start", "Create a task from a plan file; prints the questions to ask, or the first action.", task=False)
     s.add_argument("--plan", required=True, help="plan JSON file, or - for stdin (SKILL.md shows the format)")
-    s.add_argument("--statement", required=True, help="the user's request")
-    s.add_argument("--root", default=".", help="root folder for item files (default: current folder)")
-    s.add_argument("--new-files", action="store_true")
+    s.add_argument("--statement", required=True, help="the user's request, verbatim")
+    s.add_argument("--root", default=".", help="the folder the items change, where their file paths start "
+                                               "(default: the current folder)")
+    s.add_argument("--new-files", action="store_true", help="every planned file is new")
     s.add_argument("--mode", choices=("auto", "delegate", "main_session"), default="auto",
-                   help="auto: one run in main, rest to executors; delegate: all executors; main_session: all main")
+                   help="auto: one run is done in the main session, more go to executors; delegate: always "
+                        "executors; main_session: everything in the main session")
     s.add_argument("--max-parallel", type=int, default=None,
-                   help="max runs; task value = this flag, plan file, env, user config, project config, or default")
+                   help="most runs at once; the task value is the first setting that applies: this flag, "
+                        "the plan file's max_parallel, AD_MAX_PARALLEL, the user config file, "
+                        f"{PROJECT_CONFIG} in the git top, {MAX_PARALLEL}")
     s.add_argument("--review", choices=("auto", "always", "never"), default="auto",
-                   help="auto: review executor work only")
+                   help="auto: review the work that executors did, not the coordinator's own")
     s = cmd("plan", "Apply an edited plan file (default: the task's plan.json) to the items not started.")
     s.add_argument("file", nargs="?")
     s = cmd("answer", "Record an answer; --defaults accepts every open question's default.")
@@ -1666,32 +1663,33 @@ def build_parser():
     s.add_argument("--text")
     s.add_argument("--source", choices=SOURCES, default="user")
     s.add_argument("--defaults", action="store_true")
-    s = cmd("annotate", "Add a note to an item (research direction, user feedback). Flows into executor's brief.")
-    s.add_argument("--item", required=True)
-    s.add_argument("--note")
-    s.add_argument("--source", choices=ANNOTATE_SOURCES, default="user")
-    s.add_argument("--list", action="store_true")
+    s = cmd("annotate", "Add a note to an open item, or list its notes; the item's next brief carries its notes.")
+    s.add_argument("--item", required=True, help="the item id")
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--note", help="the direction for the item's next executor; kept as one line")
+    g.add_argument("--list", action="store_true", help="print the item's notes")
+    s.add_argument("--source", choices=("user", "system"), default="user", help="who the note comes from")
     cmd("next", "Land finished runs, run the task checks, and print the next action.")
     s = cmd("done", "Executor: run an item's checks and commit it.")
     s.add_argument("id")
-    s.add_argument("--result")
-    s.add_argument("--no-change")
+    s.add_argument("--result", help="a read-only item's result file (default: the path its brief names)")
+    s.add_argument("--no-change", help="why the item needs no file change")
     s = cmd("block", "Executor: park an item on a question for the user or an approval.")
     s.add_argument("id")
     s.add_argument("--question")
-    s.add_argument("--default")
-    s.add_argument("--approval")
+    s.add_argument("--default", help="the answer you would act on")
+    s.add_argument("--approval", help="the step outside the goal")
     s = cmd("decide", "Record a choice, its criteria and each rejected option.")
     s.add_argument("--question", required=True)
     s.add_argument("--chosen", required=True)
-    s.add_argument("--reject", action="append", default=[])
-    s.add_argument("--criteria")
-    s.add_argument("--because")
+    s.add_argument("--reject", action="append", default=[], help="\"<option>::<why it lost>\", once per option")
+    s.add_argument("--criteria", help="question ids holding the criteria")
+    s.add_argument("--because", help="workspace evidence, when no question holds the criteria")
     s.add_argument("--supersedes")
     cmd("status", "Print the plan, answers, decisions, progress and the next command.")
     s = cmd("resume", "Restart a stopped task after the user replied.")
-    s.add_argument("--approve")
-    s.add_argument("--deny")
+    s.add_argument("--approve", help="item ids whose step the user approved")
+    s.add_argument("--deny", help="item ids whose step the user refused")
     s.add_argument("--new-session", action="store_true")
     s = cmd("stop", "Stop the task.")
     s.add_argument("--condition", choices=("user", "fault"), required=True)
@@ -1703,20 +1701,22 @@ def build_parser():
     s = cmd("log", "Record a run-record event.")
     s.add_argument("event", choices=LOG_EVENTS)
     s.add_argument("--ref")
-    s.add_argument("--data")
+    s.add_argument("--data", help="JSON object")
     s = cmd("tune", "Change the task's max_parallel for the next round.")
-    s.add_argument("--max-parallel", type=int, required=True)
+    s.add_argument("--max-parallel", type=int, required=True,
+                   help=f"an integer from 1 to {MAX_PARALLEL_LIMIT}")
     d = cmd("doctor", "Show which max_parallel applies to a folder and from which layer.", task=False)
-    d.add_argument("--root", default=".")
-    d.add_argument("--max-parallel", type=int, default=None)
+    d.add_argument("--root", default=".", help="workspace to check (default: the current folder)")
+    d.add_argument("--max-parallel", type=int, default=None,
+                   help="what a start --max-parallel here would set")
     return p
 
 
 COMMANDS = {"next": cmd_next, "plan": cmd_plan, "answer": cmd_answer, "done": cmd_done, "block": cmd_block,
             "decide": cmd_decide, "status": cmd_status, "resume": cmd_resume, "stop": cmd_stop,
-            "finish": cmd_finish, "mark": cmd_mark, "log": cmd_log, "tune": cmd_tune,
-            "annotate": cmd_annotate}
+            "finish": cmd_finish, "mark": cmd_mark, "log": cmd_log, "tune": cmd_tune, "annotate": cmd_annotate}
 ANY_STATUS = {"status", "answer", "resume", "stop", "log", "mark", "finish", "next", "done", "block", "annotate"}
+
 
 def run(argv):
     a = build_parser().parse_args(argv)
