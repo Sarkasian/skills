@@ -5,6 +5,7 @@ SemVer. Major: rename, trigger-scope change, removed script/flag, config schema 
 ## Unreleased
 
 - SKILL.md frontmatter: `license: MIT` added, `metadata.owner` removed. No change in behaviour.
+- Added `annotate --item <id> --note "<direction>" [--source user|system]`: it adds a note to an item, and the item's next brief carries it as `Note [from <source>]: ...`. The note is kept as one line of at most 5,000 characters. A `done` or `dropped` item is refused, and a running item gets a warning that only a retry reads the note. `annotate --item <id> --list` prints the item's notes. A new command is a minor change, so the next release is 0.4.0.
 
 ## 0.3.0 (2026-11-16)
 
