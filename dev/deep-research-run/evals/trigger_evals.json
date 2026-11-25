@@ -1,0 +1,22 @@
+[
+  {"query": "Compare the differences between LDR strategies", "should_trigger": true},
+  {"query": "What are the best practices for API integration in 2025?", "should_trigger": true},
+  {"query": "Research the current state of multi-agent frameworks", "should_trigger": true},
+  {"query": "What is Formby like as a place to live?", "should_trigger": true},
+  {"query": "Investigate the history and demographics of Liverpool", "should_trigger": true},
+  {"query": "Compare Rust vs Go for backend services", "should_trigger": true},
+  {"query": "What are the latest developments in large language models?", "should_trigger": true},
+  {"query": "Research the ecosystem around MCP servers", "should_trigger": true},
+  {"query": "What is the population and history of Bootle?", "should_trigger": true},
+  {"query": "Compare different approaches to prompt engineering", "should_trigger": true},
+  {"query": "What does the function x() do in module y?", "should_trigger": false},
+  {"query": "Where is class Z defined in this codebase?", "should_trigger": false},
+  {"query": "What version of package X is installed?", "should_trigger": false},
+  {"query": "What does config key Y mean?", "should_trigger": false},
+  {"query": "How do I run the tests?", "should_trigger": false},
+  {"query": "What are the project dependencies?", "should_trigger": false},
+  {"query": "Show me the contents of file Z", "should_trigger": false},
+  {"query": "What git branch am I on?", "should_trigger": false},
+  {"query": "How many lines is file X?", "should_trigger": false},
+  {"query": "What does this error message mean?", "should_trigger": false}
+]

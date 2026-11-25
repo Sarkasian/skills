@@ -1,0 +1,67 @@
+{
+  "skill_name": "deep-research-run",
+  "evals": [
+    {
+      "id": 1,
+      "name": "town-profile-research",
+      "description": "Multi-hop synthesis: describe a town with sourced profile, dated history, and nature/geography dimensions. Requires breadth + depth LDR passes.",
+      "prompt": "What is the town of Formby, England?",
+      "expected_output": "results/formby.md",
+      "expectations": [
+        "File exists in results/ directory",
+        "Profile section with population and location figures, each with confidence and source URL",
+        "Historical facts section with dated entries (year + event + source)",
+        "Coast or nature dimension present (SSSI, National Trust, etc.)",
+        "Every claim has a source URL",
+        "Named entities present (not just 'a supermarket' — real names)",
+        "Open threads section with ≥ 2 follow-up questions",
+        "Confidence tags present (high/medium/low)",
+        "Status field is 'done'"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "technical-comparison",
+      "description": "Technical landscape survey: compare approaches/libraries with sourced analysis. Requires breadth + depth + verification.",
+      "prompt": "What are the differences between LDR's source-based and focused-iteration research strategies, and when should each be used?",
+      "expected_output": "results/strategy-pick.md",
+      "expectations": [
+        "File exists in results/ directory",
+        "Each strategy described with specific characteristics",
+        "Comparison includes strengths/weaknesses for each",
+        "Recommendation tied to use-case (window size, depth needs)",
+        "Every claim has a source URL with confidence tag",
+        "At least 3 distinct source domains consulted",
+        "Open threads with ≥ 2 follow-up questions",
+        "Status field is 'done'"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "simple-fact-question",
+      "description": "Single-fact question that should NOT trigger LDR — the routing step must choose a cheaper tool (searxng + read, or codebase tools).",
+      "prompt": "What version of local-deep-research is installed?",
+      "expected_output": "results/simple-fact.md",
+      "expectations": [
+        "File exists",
+        "Version number stated with source URL",
+        "NO LDR quick_research or detailed_research call was made (used searxng + read, or pip show, or similar)",
+        "Answer in bullets, not the full result-file format (per direct-invocation rules)",
+        "Confidence tag present"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "verification-failure",
+      "description": "A question where LDR returns results but the primary source page contradicts a claim — tests the verify-before-quoting step.",
+      "prompt": "What is the population of Formby according to the 2021 Census?",
+      "expected_output": "results/verification.md",
+      "expectations": [
+        "File exists",
+        "Population figure sourced from ONS or citypopulation.de (primary)",
+        "If LDR gave a different number, the discrepancy is noted in Unverified or Failures",
+        "Primary source page was read (not just cited)"
+      ]
+    }
+  ]
+}
