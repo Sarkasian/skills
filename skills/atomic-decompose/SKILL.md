@@ -4,6 +4,10 @@ description: "Plans a big task as small work items, asks every scope or user-onl
 license: MIT
 metadata:
   version: 0.3.0
+  composes_with:
+    - skill: deep-research-run
+      when: item type is research
+      role: executor
 ---
 # Atomic Decompose
 
