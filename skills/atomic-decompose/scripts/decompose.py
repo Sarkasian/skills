@@ -1249,7 +1249,7 @@ def cmd_annotate(task, a):
             raise Fail("bad_input", "--note must not be empty", 2)
         if a.note is not None and a.note.strip().startswith("#"):
             raise Fail("bad_input", "--note must not start with #", 2)
-        if len(a.note) > 5000:
+        if a.note is not None and len(a.note) > 5000:
             raise Fail("bad_input", f"--note must be under 5000 characters ({len(a.note)} found)", 2)
         if a.note is not None:
             entry = {"text": a.note, "source": a.source, "at": _now()}

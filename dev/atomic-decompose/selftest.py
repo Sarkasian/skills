@@ -609,6 +609,121 @@ def test_no_git_workspace():
     check(out["items"] == ["2"], "[W13] the next writer goes after")
 
 
+def test_annotate_add_note():
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"])])
+    # item starts running automatically after start (advance calls start_runs)
+    out, _ = run("annotate", "--item", "1", "--note", "remember the cache size", "--task", t)
+    check(out["note_added"] and out["note"] == "remember the cache size",
+          "[A1] annotate --note records the text and returns it")
+    it1 = it(t, "1")
+    check(len(it1["notes"]) == 1 and isinstance(it1["notes"][0], dict),
+          "[A1] the note is stored as a dict entry")
+    entry = it1["notes"][0]
+    check(entry["text"] == "remember the cache size" and entry["source"] == "user",
+          "[A1] the dict has correct text and default source")
+    check(entry["at"] is not None and entry["at"].startswith("20"),
+          "[A1] the note has a timestamp")
+
+
+def test_annotate_list_notes():
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"])])
+    run("annotate", "--item", "1", "--note", "first note", "--task", t)
+    run("annotate", "--item", "1", "--note", "second note", "--task", t)
+    out, _ = run("annotate", "--item", "1", "--list", "--task", t)
+    check(len(out["notes"]) == 2,
+          "[A2] --list returns all notes in order")
+    check(out["notes"][0]["text"] == "first note" and out["notes"][1]["text"] == "second note",
+          "[A2] notes are returned in insertion order")
+
+
+def test_annotate_source_parameter():
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"])])
+    out, _ = run("annotate", "--item", "1", "--note", "user research", "--source", "user", "--task", t)
+    it1 = it(t, "1")
+    check(it1["notes"][0]["source"] == "user",
+          "[A3] --source sets the source field")
+    # list also shows source
+    out, _ = run("annotate", "--item", "1", "--list", "--task", t)
+    check(out["notes"][0]["source"] == "user", "[A3] --list shows the source")
+
+
+def test_annotate_invalid_note():
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"])])
+    # empty note
+    refused("bad_input", 2, "annotate", "--item", "1", "--note", "", "--task", t)
+    # whitespace-only note
+    refused("bad_input", 2, "annotate", "--item", "1", "--note", "   ", "--task", t)
+    # note starting with #
+    refused("bad_input", 2, "annotate", "--item", "1", "--note", "# heading", "--task", t)
+    # no --note or --list
+    refused("bad_input", 2, "annotate", "--item", "1", "--task", t)
+    # non-existent item
+    refused("bad_input", 2, "annotate", "--item", "99", "--note", "x", "--task", t)
+
+
+def test_annotate_long_note():
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"])])
+    long_text = "x" * 5001
+    refused("bad_input", 2, "annotate", "--item", "1", "--note", long_text, "--task", t)
+    # exactly 5000 should pass
+    ok, _ = run("annotate", "--item", "1", "--note", "x" * 5000, "--task", t)
+    check(ok["note_added"], "[A5] a 5000-char note is accepted")
+
+
+def test_annotate_coexists_with_auto_notes():
+    """Manual (dict) notes and auto (string) notes should both be readable."""
+    root = repo()
+    # Start a non-git task so shelve produces no patch note but done still works
+    root2 = os.path.join(TMP, "repo_nogit")
+    os.makedirs(root2)
+    with open(os.path.join(root2, "a.txt"), "w") as f:
+        f.write("a\n")
+    t, _ = start(root2, [item("A", ["a.txt"], check_cmd=["true"])])
+    # add a manual note
+    run("annotate", "--item", "1", "--note", "manual note here", "--task", t)
+    # done generates an automatic note via shelve (no git = no note)
+    run("done", "1", "--task", t)
+    st = state(t)
+    it1 = st["items"][0]
+    check(it1["status"] == "done",
+          "[A6] the item is done")
+    # list should show the manual note
+    out, _ = run("annotate", "--item", "1", "--list", "--task", t)
+    check(len(out["notes"]) == 1 and out["notes"][0]["text"] == "manual note here",
+          "[A6] manual notes are readable after done")
+
+
+def test_annotate_with_auto_notes_in_git():
+    """Manual notes coexist with shelve-generated auto notes."""
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"])])
+    # add a manual note
+    run("annotate", "--item", "1", "--note", "manual note here", "--task", t)
+    # The note list should show the manual note
+    out, _ = run("annotate", "--item", "1", "--list", "--task", t)
+    check(out["notes"][0]["text"] == "manual note here",
+          "[A7] manual notes are in the list")
+
+
+def test_annotate_source_annotation():
+    """The annotate source itself should be recorded."""
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"])])
+    out, _ = run("annotate", "--item", "1", "--note", "test", "--task", t)
+    it1 = it(t, "1")
+    check(it1["notes"][0]["source"] == "user",
+          "[A9] default source is 'user'")
+    out, _ = run("annotate", "--item", "1", "--note", "test2", "--source", "system", "--task", t)
+    it1 = it(t, "1")
+    check(it1["notes"][1]["source"] == "system",
+          "[A9] custom source is recorded")
+
+
 def test_docs_name_real_commands():
     skill = open(os.path.join(HERE, "..", "..", "skills", "atomic-decompose", "SKILL.md")).read()
     names = set(dc.COMMANDS) | {"start"}
