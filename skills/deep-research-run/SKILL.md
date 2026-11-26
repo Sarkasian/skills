@@ -1,11 +1,9 @@
 ---
 name: deep-research-run
-description: Research method for an atomic-decompose research item (or a standalone question). Routes the question to the cheapest tool, runs a local-deep-research pass, verifies claims against primary sources, and harvests open questions for follow-up. Use when a question requires multi-hop synthesis, landscape surveys, or comparison — not for single-fact lookups, codebase queries, or library docs (use searxng + read, context7, or codebase tools instead).
+description: "Researches one question with the local-deep-research (LDR) engine: picks the cheapest tool, runs a breadth pass and a depth pass, checks claims against primary sources and lists open questions. Use for an atomic-decompose research item, or a question that needs multi-hop synthesis, a landscape survey or a comparison. Not for one fact, a codebase question or library docs."
+license: MIT
 metadata:
-  composes_with:
-    - skill: atomic-decompose
-      when: executing as a research item within a decomposed plan
-      role: worker
+  version: 0.1.0
 ---
 
 # Deep research run
@@ -14,6 +12,10 @@ You are executing ONE research item. Your output is `results/<id>.md` (or
 the path given in the brief). The item's `check` criteria are the contract:
 meet them, not more. You have no memory between items — everything the next
 item needs must be in the result file.
+
+Needs the local-deep-research MCP server (the "engine" below). An
+atomic-decompose plan uses this skill by naming it in a research item's
+`skill` field.
 
 ## Step 1 — Check the research configuration
 
@@ -28,9 +30,9 @@ The engine reads environment variables — they may not be set.
    instead of the SearXNG service port). Try the correct URL and re-run.
    If the engine still returns zero results, report the error and stop.
 
-If the skill includes a `references/config-guide.md` file, read it for the
-required environment variables and their values. Do not hard-code them —
-they differ per host and per model.
+`references/config-guide.md` lists the environment variables the engine
+needs, with example values. The real values differ per host and per model:
+take them from `get_configuration`, and do not hard-code them.
 
 ## Step 2 — Route the question (before any research pass)
 
@@ -52,14 +54,14 @@ question — if so, use the engine's document analysis instead of re-searching.
 
 **Source diversity is mandatory.** No single source is sufficient for any
 research item. Use at least 3 distinct source domains. For technical
-questions: GitHub repos, official docs, community blogs. For profiles:
-government data, local authority pages, established guides.
+questions: GitHub repos, official docs, community blogs. For other
+questions: the primary data or official body, then independent commentary.
 
 ## Step 3 — Run the research pass (cost budget is mandatory)
 
-Every research pass runs its own LLM on a local model, which queues on the
-same GPU as the main session. **Only one research call at a time.** Never
-run parallel research passes.
+Every research pass runs its own LLM. On a local model it queues on the
+same hardware as the main session. **Only one research call at a time.**
+Never run parallel research passes.
 
 **Strategy selection:**
 - **Source-based** — best for depth with small context windows; prompts are
@@ -86,21 +88,17 @@ result under `## Failures`. Never invent results.
 
 ## Step 4 — Verify before quoting
 
-Every claim you write into the result must be:
-
-1. Tied to a URL you actually saw in search results, and
-2. Confirmed by reading the source page (or the primary repo/docs).
-
-Every claim in the Answers section carries a confidence tag.
+Every claim you write into the result must be tied to a URL you actually
+saw in search results. Read the source page (or the primary repo/docs) for
+every claim the item's `check` rests on. Tag each claim with how far you
+verified it:
 
 - **High** — confirmed by reading the primary source page directly.
 - **Medium** — stated by LDR synthesis and corroborated by at least one
   other independent source, but you did not read the primary page.
 - **Low** — only from synthesis with no corroboration, or from a source you
-  suspect is unreliable. These go under `## Unverified`.
-
-Claims you cannot verify (only synthesis, no readable primary source) go
-under `## Unverified` with a one-line reason.
+  suspect is unreliable. These go under `## Unverified` with a one-line
+  reason, never under `## Answers`.
 
 ## Step 5 — Write the result file
 
@@ -110,7 +108,7 @@ under `## Unverified` with a one-line reason.
 - [ ] `## Unverified` lists every low-confidence claim with a reason
 - [ ] `## Failures` logs every engine/tool error (omit if none)
 - [ ] **Source diversity:** at least 3 distinct source domains
-- [ ] **Named entities:** specific names (stores, schools, streets, people) — generic labels are not sufficient
+- [ ] **Named entities:** the specific name of each thing, not a generic label
 - [ ] **Dimensions:** if primary pages have significant sections beyond the item's
   check, add them as sub-sections under `## Answers`
 
@@ -119,6 +117,9 @@ under `## Unverified` with a one-line reason.
 ```markdown
 # <item id> — <question>
 Status: done | partial | replant
+<!-- done: every `check` point is met. partial: some are; say which are not.
+     replant: the question as asked cannot be answered; `Open threads` holds
+     the questions to plan instead. -->
 
 ## <Primary dimension requested by the check>
 - Claim with named entity, one line. Confidence: high. Source: <url>
@@ -156,15 +157,8 @@ If the engine times out or the call is interrupted:
 1. Save any partial output you have to `results/<id>-partial.md`.
 2. On resume, read the partial file and continue from where you left off.
 
-## Compaction survival
-
-After writing the result file, save a one-line checkpoint to the task's
-state directory:
-```
-status=done  result=<absolute path to results/<id>.md>
-```
-If the executor was interrupted mid-way, the next run reads this checkpoint
-and skips completed steps.
+The result file is the only checkpoint. Inside a task, write nothing else
+to the task folder and finish with the `done` command the brief gives.
 
 ## Direct invocation (no task item)
 

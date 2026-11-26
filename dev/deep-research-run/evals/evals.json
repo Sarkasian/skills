@@ -5,7 +5,7 @@
       "id": 1,
       "name": "town-profile-research",
       "description": "Multi-hop synthesis: describe a town with sourced profile, dated history, and nature/geography dimensions. Requires breadth + depth LDR passes.",
-      "question": "What is the town of Formby, England?",
+      "prompt": "What is the town of Formby, England?",
       "expected_output": "results/formby.md",
       "expectations": [
         "File exists in results/ directory",
@@ -23,7 +23,7 @@
       "id": 2,
       "name": "technical-comparison",
       "description": "Technical landscape survey: compare approaches/libraries with sourced analysis. Requires breadth + depth + verification.",
-      "question": "What are the differences between LDR's source-based and focused-iteration research strategies, and when should each be used?",
+      "prompt": "What are the differences between LDR's source-based and focused-iteration research strategies, and when should each be used?",
       "expected_output": "results/strategy-pick.md",
       "expectations": [
         "File exists in results/ directory",
@@ -40,7 +40,7 @@
       "id": 3,
       "name": "simple-fact-question",
       "description": "Single-fact question that should NOT trigger LDR — the routing step must choose a cheaper tool (searxng + read, or codebase tools).",
-      "question": "What version of local-deep-research is installed?",
+      "prompt": "What version of local-deep-research is installed?",
       "expected_output": "results/simple-fact.md",
       "expectations": [
         "File exists",
@@ -54,7 +54,7 @@
       "id": 4,
       "name": "verification-failure",
       "description": "A question where LDR returns results but the primary source page contradicts a claim — tests the verify-before-quoting step.",
-      "question": "What is the population of Formby according to the 2021 Census?",
+      "prompt": "What is the population of Formby according to the 2021 Census?",
       "expected_output": "results/verification.md",
       "expectations": [
         "File exists",

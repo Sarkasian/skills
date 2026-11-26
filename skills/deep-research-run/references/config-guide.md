@@ -1,11 +1,8 @@
 # Configuration guide
 
-This file is loaded ONLY when the executor starts — it is one level deep.
-It contains the engine's required environment variables and their values.
-
-> **Per-host:** These values are examples. Each machine may differ. Create a
-> `machine-local/config-guide.md` next to this file with your actual values,
-> and point the skill at it instead.
+The environment variables the local-deep-research engine needs. The values
+are examples: each machine differs, and the engine's `get_configuration`
+tool shows the values in effect.
 
 ## Required environment variables
 

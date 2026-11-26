@@ -6,6 +6,7 @@ Agent skills in the [Agent Skills](https://agentskills.io/specification) layout:
 | --- | --- |
 | [`atomic-decompose`](skills/atomic-decompose/SKILL.md) | Plans a substantial task as small work items, asks every question it needs from you once with a default, then works to completion from saved state: small jobs in the main session, independent parts by sub-agents in parallel. |
 | [`authoring-agent-skills`](skills/authoring-agent-skills/SKILL.md) | Designs, scaffolds, lints and evaluates agent skills and plugins: picks skill, MCP server, hook or rule, writes evals first, and checks the result with bundled scripts. |
+| [`deep-research-run`](skills/deep-research-run/SKILL.md) | Researches one question with the local-deep-research (LDR) engine: picks the cheapest tool, checks claims against primary sources and writes a sourced result file with open questions. Works alone or as the skill of an `atomic-decompose` research item. |
 
 ## Install
 
@@ -25,7 +26,7 @@ gh skill install <owner>/<repo> atomic-decompose --scope user
 
 By hand: copy `skills/atomic-decompose/` to `~/.agents/skills/` (read by Cursor, Codex and Zoo Code) and symlink `~/.claude/skills/atomic-decompose` to it (Claude Code). Install it in one location only, or a host that reads several folders may load it twice.
 
-Pin a release with `#<tag>` (`npx skills`) or `@<tag>` (`gh skill`). Both skills run local Python scripts, so read a skill before installing it (`gh skill preview`).
+Pin a release with `#<tag>` (`npx skills`) or `@<tag>` (`gh skill`). `atomic-decompose` and `authoring-agent-skills` run local Python scripts, so read a skill before installing it (`gh skill preview`).
 
 ## atomic-decompose
 
@@ -49,6 +50,10 @@ Parts that share no file are worked on at the same time, at most `max_parallel` 
 Requirements: `python3`, standard library only. Its scripts write only where you point them: `scaffold.py` creates the new skill under `--dest` (and refuses to overwrite without `--force`), `lint_skill.py` and `score_trigger_evals.py` read files and print JSON.
 
 The skill holds principles, not host-specific facts such as frontmatter keys, folder paths or CLI commands. It tells the agent to look those up in each host's current documentation, from the list in `references/sources.md`.
+
+## deep-research-run
+
+The skill has no scripts. It needs the [local-deep-research](https://github.com/LearningCircuit/local-deep-research) MCP server, and `references/config-guide.md` lists the environment variables that server reads.
 
 ## Develop
 
