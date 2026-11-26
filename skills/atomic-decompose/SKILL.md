@@ -4,10 +4,6 @@ description: "Plans a big task as small work items, asks every scope or user-onl
 license: MIT
 metadata:
   version: 0.3.0
-  composes_with:
-    - skill: deep-research-run
-      when: item type is research
-      role: executor
 ---
 # Atomic Decompose
 
@@ -36,8 +32,8 @@ Read only what the plan needs. Then write a plan file, in a temp folder outside 
 
 - **`requirements`**: each part of the request, numbered R1, R2 and so on. Every one needs an item that `covers` it.
 - **One item, one deliverable.** Its `goal` is all the executor gets, so look the facts up and write them in: names, places in the file, the exact behaviour, the edge cases.
-- **`files`**: every file the item may change (`dir/` covers a folder). Items sharing a file run in order; separate files run in parallel. Don't force a split — the script handles it. `depends: ["<id>"]` makes an item wait for another's result.
-- **`check_cmd`**, on every item with `files`: the repository's own test command, narrowed to the item where possible. Must include a negative case that fails if the work is wrong.
+- **`files`**: every file the item may change (`dir/` covers a folder). Items that share a file run in order in one executor; items that share none run at the same time. So give separable parts separate files, but do not force a split: the script decides what runs at once, even when the user asks for parallel work. `depends: ["<id>"]` makes an item wait for another's result (its `id`, or its position from 1).
+- **`check_cmd`**, on every item with `files`: the repository's own test command as one string, narrowed to the item where possible. The item's tests must include a negative case that fails if the work is wrong. The top-level `check_cmd` checks the whole task.
 - **A read-only item** (research, a comparison) has no `files`. Give it `check`: the points you will judge its result by.
 - **`questions`**: only what the workspace cannot answer, each with the `default` you would act on. `scope` is audience, depth and criteria; `user_only` is names, budgets, owners and dates; `confirm` is a fact you found that the user should know, with the evidence as `because`. Put each question's id in the `needs` of the items it changes.
 - **`skill`**: the name of an installed skill that fits the item, if one does.
@@ -66,8 +62,8 @@ When the user accepts, run `ad mark --mark accepted --task <T>`. For rework, run
 
 ## Never
 
-- Edit workspace files yourself, except as an executor following a brief (`do_yourself`).
-- Clear a stop without the user's reply.
+- Edit, commit or revert workspace files yourself, except as an executor following a brief (`do_yourself`).
+- Clear a stop without the user's reply, or approve a step for them.
 - End your turn while an executor is still working.
 - Quote check output in the report except from a fresh run.
 - Edit `state.json` or `record.jsonl` by hand.
