@@ -4,7 +4,7 @@
     {
       "id": 1,
       "name": "planner-brief-comparison",
-      "setup": "Host has a search tool and a fetch tool. A deep-research tool may be present. Copy files/fts-compare/ into an empty workspace.",
+      "setup": "Host has a search tool and a fetch tool. A deep-research tool may be present. Copy files/fts-compare/ into an empty workspace. The brief follows the wording atomic-decompose builds; its block and done commands are stand-ins that append to blocks.log and done.log.",
       "prompt": "Your whole task is the brief at brief.md. Read it, then follow it.",
       "expected_output": "results/1.md in the result format, and done.log",
       "files": ["evals/files/fts-compare/brief.md"],
@@ -15,9 +15,11 @@
         "Every bullet under '## Answers' contains 'Confidence: high' or 'Confidence: medium' and 'Source:' followed by a URL",
         "The sources include pages on sqlite.org, postgresql.org and dev.mysql.com, and the transcript shows each of those pages was opened",
         "done.log contains the line 'done 1', written after results/1.md",
-        "The workspace holds no new file other than results/1.md, done.log and approvals.log",
+        "The workspace holds no new file other than results/1.md and done.log; in particular there is no blocks.log, so the item was never blocked",
         "The transcript shows no question to the user",
-        "If the transcript shows a deep-research pass, '## Passes' lists it, and no two passes overlap in time"
+        "The line of results/1.md that starts with '# ' quotes the item's goal or title, not the brief's 'Request:' line",
+        "The transcript shows no deep-research call that the tool's own figures put above 5 minutes, since the brief allows none and says not to ask",
+        "If the transcript shows a deep-research pass, '## Passes' lists it, there are at most two passes, and no pass starts before the previous one returned"
       ]
     },
     {
@@ -34,6 +36,7 @@
         "Under '## Answers' there is one '###' sub-heading for each of the three acceptance bullets",
         "Every bullet under '## Answers' contains 'Confidence: high' or 'Confidence: medium' and 'Source:' followed by a URL",
         "The sources include pages on docs.github.com, a stripe.com documentation page and a slack.com documentation page",
+        "If the transcript shows deep-research passes, there are at most two and '## Passes' lists each",
         "'## Open threads' is present and holds either 'None.' or questions",
         "The workspace holds no new file other than out/R7.md"
       ]
@@ -50,7 +53,7 @@
         "The final message names an algorithm for each of nginx, Envoy and AWS API Gateway",
         "Each claim in the final message has a confidence tag (high or medium) and a source URL",
         "The sources include pages on nginx.org, envoyproxy.io and docs.aws.amazon.com, and the transcript shows each was opened",
-        "The transcript shows no deep-research pass started without the user being told its expected time or cost first, unless the tool's model is local and the pass is expected to take 5 minutes or less"
+        "The transcript shows no deep-research pass started without the user being told its expected time or cost first, unless the pass is neither long nor paid: the engine's model is local, no search service it uses needs an API key or bills per call, and the pass is expected to take 5 minutes or less"
       ]
     },
     {
@@ -82,7 +85,7 @@
         "The 'Status:' line says done",
         "The 'Route:' line names route 1 or the word 'known'",
         "A 'Source:' in results/C1.md is the file path requirements.txt",
-        "The transcript shows no search call, no fetch call and no deep-research call",
+        "The transcript shows no search call, no fetch call and no call to any tool of a deep-research engine, its configuration and listing tools included",
         "'## Passes' holds 'None.'",
         "The workspace holds no new file other than results/C1.md"
       ]
@@ -97,8 +100,25 @@
       "expectations": [
         "The final message says 3.11 and gives a docs.python.org or peps.python.org URL",
         "The transcript shows at most 2 search or fetch calls in total",
-        "The transcript shows no deep-research call",
+        "The transcript shows no call to any tool of a deep-research engine, its configuration and listing tools included",
         "The workspace holds no new file"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "no-fetch-tool",
+      "setup": "Host has NO search tool and NO fetch tool: switch off every web tool, research engine and research mode before the run. Copy files/fts-compare/ into an empty workspace.",
+      "prompt": "Your whole task is the brief at brief.md. Read it, then follow it.",
+      "expected_output": "results/1.md with Status: partial, and done.log",
+      "files": ["evals/files/fts-compare/brief.md"],
+      "expectations": [
+        "results/1.md exists and its second line is 'Status: partial'",
+        "The 'Not met:' line names the acceptance points, and '## Failures' says that no fetch tool is available",
+        "'## Answers' holds no bullet with 'Source:' followed by a URL",
+        "results/1.md has the headings '## Answers', '## Unverified', '## Failures', '## Open threads' and '## Passes', each once",
+        "done.log contains the line 'done 1', written after results/1.md",
+        "The workspace holds no new file other than results/1.md and done.log",
+        "The transcript shows no question to the user and no call to a tool that does not exist in the session"
       ]
     }
   ]

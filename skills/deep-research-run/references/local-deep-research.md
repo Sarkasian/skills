@@ -19,18 +19,18 @@ Tools are written here as `local-deep-research:<tool>`. The part before the colo
 
 Every tool returns `status`: `success` or `error`. On an error it also returns `error` and `error_type`. The times are the project's own figures; a small local model can be slower.
 
-## The check in step 1
+## The check in step 3
 
 1. Call `local-deep-research:get_configuration`. Note `config.llm.provider`, `config.llm.model` and `config.search.default_engine`.
 2. Call `local-deep-research:search` with `engine` set to that default engine, `query` set to `Python programming language` and `max_results` set to 3.
 3. The check passes when both return `status: success` and `result_count` is 1 or more.
 
-If step 2 returns `error_type: configuration_error`, the default engine is one that cannot run without a model. Repeat step 2 once with an engine from `local-deep-research:list_search_engines` that has `requires_api_key: false`, for example `wikipedia`.
+If the second call returns `error_type: configuration_error`, the default engine is one that cannot run without a model. Repeat it once with an engine from `local-deep-research:list_search_engines` that has `requires_api_key: false`, for example `wikipedia`.
 
 ## Local or paid
 
 - The model is local when `config.llm.provider` is `ollama`, `llamacpp` or `lmstudio` (in any letter case). Treat any other provider as paid.
-- A search engine with `requires_api_key: true` may be metered. Treat it as paid unless the brief allows it.
+- A search engine with `requires_api_key: true` needs a key and may bill per call. Treat it as paid unless the brief allows it. An engine with `requires_api_key: false` is not paid.
 - Every query goes to each search engine you name, and every research prompt goes to the model provider. The "never" rule about secrets and private content applies to both.
 
 ## How the passes map
@@ -38,16 +38,33 @@ If step 2 returns `error_type: configuration_error`, the default engine is one t
 - Raw search (step 3, default route): `local-deep-research:search`, one call per engine. Take engine names from `local-deep-research:list_search_engines`. Use it like any other search tool; it costs no model time.
 - Breadth pass: `local-deep-research:quick_research` with `query`, `strategy: source-based` and `iterations: 1`.
 - Deeper pass: `local-deep-research:detailed_research` with `query`, `strategy: source-based` and `iterations: 2`.
-- Strategy: always `source-based`. The engine's own default is `langgraph-agent`, which costs the most, and the project recommends `source-based` for a small local context. Use another strategy only when the brief names it, and then take the exact name from `local-deep-research:list_strategies`.
+- Strategy: always `source-based`, which the project labels as best for a small context window. The default in force is in `config.search.default_strategy` (`langgraph-agent` unless the owner changed it); do not rely on it. Use another strategy only when the brief names it, and then take the exact name from `local-deep-research:list_strategies`.
 - These arguments apply to the one call only and are not saved, so passing them does not change the engine's configuration.
-- `local-deep-research:generate_report`: only when the brief asks for a full report. It is a long pass, so the agreement rule applies.
+- `local-deep-research:generate_report`: only when the brief asks for a full report.
 - `local-deep-research:analyze_documents`: only when the brief names a document collection. It does not read earlier research.
+
+## Time, with numbers
+
+Plan with the upper figure of each range in the table above.
+
+| Call | Plan for | Long (over 5 minutes)? | Fits the default 15 minutes for one pass? |
+|---|---|---|---|
+| `local-deep-research:quick_research`, `iterations: 1` | 5 minutes | No. On a local model with unpaid search engines it needs no agreement. | Yes |
+| `local-deep-research:detailed_research`, `iterations: 2` | 15 minutes | Yes. It needs the brief's allowance or a yes. | Yes, exactly |
+| `local-deep-research:generate_report` | 30 minutes | Yes. | No. Only when the brief gives a limit of 30 minutes or more for the pass. |
+
+With no limit in the brief, the core allows 15 minutes for one pass, 30 minutes for all passes and waiting together, and two passes with a retry counting as one. That gives:
+
+- Breadth and deeper pass both return: 5 + 15 = 20 minutes. Both passes are used.
+- Breadth returns, the deeper pass is cut off at 15 minutes: 20 minutes and both passes are used. No retry and no wait: close the open points with search and fetch.
+- Breadth is cut off after N minutes: wait N minutes (see below), then retry once, smaller, if 5 minutes are still left of the 30. Cut off at 1 minute: 1 + 1 + 5 = 7 minutes. Cut off at 15 minutes: 15 + 15 = 30, so there is no retry.
+- A brief that gives 20 minutes for the whole item: keep about 7 for searches and step 4. That leaves 13: one breadth pass, and no deeper pass.
 
 ## Ids and late results
 
 - `local-deep-research:detailed_research` returns a `research_id`; `local-deep-research:quick_research` returns none. Write the id under `## Passes`.
-- No tool takes a `research_id`, and there is no status tool. Every call is synchronous: a result exists only in the reply to the call. So a call that the host cuts off cannot be collected later. Skip the "ask for it once" step and go to the smaller retry.
-- Whether the server keeps working on a call the host has cut off is not known. Assume it does: on a local model, wait as long as the cut-off call had run before you start the smaller retry. `local-deep-research:search` uses no model and can run meanwhile.
+- No tool takes a `research_id`, and there is no status tool. Every call is synchronous: a result exists only in the reply to the call. So a call that the host cuts off cannot be collected later. Skip the "ask for it once" step and go to the smaller retry, if a pass and the time are left.
+- Whether the server keeps working on a call the host has cut off is not known. Assume it does: on a local model, wait as long as the cut-off call had run before you start the smaller retry. The wait counts as time used. `local-deep-research:search` uses no model and can run meanwhile.
 
 ## Gotchas
 

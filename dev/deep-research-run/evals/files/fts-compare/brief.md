@@ -1,7 +1,8 @@
-Task t-fts, items 1: you do all of them, alone, in this order. Work in this folder (change files only here).
+Task t-fts, items 1: you do all of them, alone, in this order. Work in . (cd there first; change files only there).
 Request: Which database should our notes app use for full-text search?
-One item at a time: do its goal and run its `done` command before you start the next item.
-A step outside the goal (other files, contacting anyone): echo "block 1 --approval <step>" >> approvals.log, then go on.
+One item at a time: do its goal and run its `done` command before you start the next item, because `done` commits every change in the item's files. `done` runs the checks first; on a failure it prints why: fix it and run `done` again, at most 3 times, then go on. Only `done` commits: never run git commit, reset, clean or stash, or change the task folder.
+Need a fact only the user knows: echo "block <id> --question '<q>'" >> blocks.log, then go on.
+A step outside the goal (other files, deleting, contacting anyone): echo "block <id> --approval '<step>'" >> blocks.log, then go on.
 Do not ask the user anything. Reply with one line per item saying what you did.
 
 ITEM 1: Compare built-in full-text search in SQLite, PostgreSQL and MySQL   [Skill: deep-research-run, load it first]

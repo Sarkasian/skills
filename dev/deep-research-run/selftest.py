@@ -31,6 +31,19 @@ def main() -> None:
     for ref in on_disk:
         assert "references/" not in (SKILL / ref).read_text(encoding="utf-8"), f"{ref} points at another reference"
 
+    # Every status, step and route that the skill, a reference or an eval names is one the skill defines.
+    statuses = set(template.splitlines()[1][len("Status: "):].split(" | "))
+    steps = set(re.findall(r"(?m)^## (\d)\. ", text))
+    routes = set(re.findall(r"(?m)^\| (\d)\. ", text))
+    assert statuses and steps and routes, "template statuses, numbered steps or route rows not found"
+    everything = text.replace(template, "") + (DEV / "evals" / "evals.json").read_text(encoding="utf-8")
+    for ref in on_disk:
+        everything += (SKILL / ref).read_text(encoding="utf-8")
+    for kind, known, found in (("status", statuses, re.findall(r"Status: (\w+)", everything)),
+                               ("step", steps, re.findall(r"\b[Ss]teps? (\d)", everything)),
+                               ("route", routes, re.findall(r"\b[Rr]outes? (\d)", everything))):
+        assert set(found) <= known, f"unknown {kind}: {sorted(set(found) - known)}"
+
     # The core names no engine tool as Server:tool; that belongs in the engine reference.
     assert "local-deep-research:" not in text, "Server:tool names belong in references/local-deep-research.md"
 
