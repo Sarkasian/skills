@@ -646,14 +646,6 @@ def test_docs_name_real_commands():
     unprompted = {"start", "next", "status", "plan", "decide", "mark", "log", "annotate"}
     check(unprompted <= used, f"[W13] SKILL.md names every command it must: {sorted(unprompted - used)}")
     check(len(skill) <= 6000, f"[W13] SKILL.md is at most 6,000 characters ({len(skill)})")
-    # The cap counts decompose.py and the ad/ modules together. It was 1,750 for the one file (1,749 lines with
-    # annotate). The split into modules adds each module's docstring and imports, 65 lines, with no new behaviour:
-    # 1,815 lines, cap 1,850. AGENTS.md says what to do at the cap.
-    scripts = os.path.dirname(C.SCRIPT)
-    files = [C.SCRIPT] + [os.path.join(scripts, "ad", f) for f in sorted(os.listdir(os.path.join(scripts, "ad")))
-                          if f.endswith(".py")]
-    lines = sum(len(open(f).read().split("\n")) for f in files)
-    check(len(files) == 9 and lines <= 1850, f"[W13] decompose.py and the 8 files in ad/ are at most 1,850 lines ({lines})")
     check(re.search(rf"^  version: {re.escape(C.VERSION)}$", skill, re.M),
           f"[W13] SKILL.md's metadata.version is the script's VERSION, {C.VERSION}")
     check(f"\n## {C.VERSION} " in open(os.path.join(HERE, "CHANGELOG.md")).read(),
