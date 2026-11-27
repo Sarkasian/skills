@@ -3,7 +3,7 @@ name: authoring-agent-skills
 description: "Creates, fixes and reviews agent skills (SKILL.md) and plugins: skill vs MCP vs plugin vs hook, evals, lint, description tuning. Use when creating, splitting or reviewing a skill or plugin, when a skill is not picked up, or when a procedure the agent is told again and again should load by itself. Not for ordinary code or docs, using an existing skill, or product documents about skills."
 license: MIT
 metadata:
-  version: 1.2.1
+  version: 1.3.0
 ---
 # Authoring agent skills
 
@@ -60,6 +60,7 @@ Read `references/authoring.md`. Hard rules:
 - Fragile, bulk or must-be-identical work goes in `scripts/`: non-interactive, `--help`, JSON on stdout, errors on stderr, distinct exit codes, idempotent, `--dry-run` if destructive. Say "Run X", never "See X".
 - Destructive or batch work: plan → validate script → apply → verify.
 - References one level deep, each with its load condition ("read X if Y").
+- At a size limit, restructure: situational text goes to `references/`, a long script becomes modules behind the same entry script. Never cut instructions, help text or tests to fit.
 - Generic verbs ("read the file", "run `python3 scripts/<name>.py`"), relative forward-slash paths, no harness tool names.
 - Frontmatter: only `name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools`, unless a target host needs more (e.g. its switch that makes a side-effecting skill user-invoked only; look the key up per host).
 - No secrets in the skill; scripts read them from env or the host's secret store.

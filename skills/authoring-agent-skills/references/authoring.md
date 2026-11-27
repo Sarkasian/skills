@@ -4,7 +4,7 @@ Host-specific names, limits and paths are left out of this file because they cha
 - Use a script for: sorting, copying between tools, transforms, parsing, validation, document assembly, anything that must repeat identically, or a helper the agent keeps rewriting in eval transcripts.
 - Degrees of freedom, set per section: high (prose; many valid approaches, e.g. review), medium (pseudocode or parameterized script), low (exact command; fragile or order-sensitive, e.g. migrations).
 - "Run X" = execute (only output costs tokens). "See X" = read as reference. Be explicit about which.
-- Script contract: non-interactive (flags/env/stdin); `--help`; JSON on stdout, diagnostics on stderr; distinct exit codes; idempotent; `--dry-run` for destructive ops; reject ambiguous input; bounded output (hosts truncate long tool output; support `--offset`/`--output`); actionable errors ("Field X not found. Available: …"); self-contained deps (inline script metadata, pinned package versions); handle errors in the script; document every constant.
+- Script contract: non-interactive (flags/env/stdin); `--help`; JSON on stdout, diagnostics on stderr; distinct exit codes; idempotent; `--dry-run` for destructive ops (the lint warns when a script deletes, pushes or publishes without one; if a preview would add no safety, because the script removes only its own temp files or saves a copy first, put a comment `lint: no-dry-run: <reason>` in that file instead); reject ambiguous input; bounded output (hosts truncate long tool output; support `--offset`/`--output`); actionable errors ("Field X not found. Available: …"); self-contained deps (inline script metadata, pinned package versions); handle errors in the script; document every constant.
 - Plan → validate → execute: write `plan.json` → validator checks it against the source of truth → apply → verify.
 - Code execution with MCP: expose tools as a code API on the filesystem; filter in a sandbox; data flows tool-to-tool without entering the model. Cost: sandbox, limits, monitoring. Consolidate chained tools (`schedule_event` instead of 3 calls).
 - Disagreement: Anthropic leans toward scripts; Codex says prefer instructions unless you need determinism; skills with scripts are more often found vulnerable. → Use scripts where determinism matters; review and scan them.
@@ -32,6 +32,13 @@ Host-specific names, limits and paths are left out of this file because they cha
 - Prompt cache: the cached prefix is tools, then system text, then messages, and a change early in it invalidates everything after. Put timestamps and per-request data last. Don't let hooks or skills change tool lists or system text mid-session.
 - Descriptions: pushy but ≲400 chars, use case first.
 - Measure with the host's own usage and cost tools.
+
+## When a file reaches its size limit
+A size limit (the body budget above, or a cap that a skill's own tests set) keeps the skill cheap to load and stops it growing. Meet it by restructuring, never by squeezing.
+- SKILL.md: move what only one situation needs (resuming, the final report, a rare command, a long example) to `references/<situation>.md` and leave one line that says when to read it. Where a script drives the work, have its output name the file at the moment it is needed. What applies on every run stays: the core steps and the "never" rules.
+- A script: do not cap its lines. The agent runs it and does not load it, so its length costs nothing per run, and improving it makes it longer. Keep it in one file while it reads top to bottom. When it outgrows that, split it along its existing sections into modules in a folder beside a thin entry script, so the command the agent runs does not change. Standard library only still holds.
+- Never delete instructions, argument help, tests, sentences in the docs or blank lines to pass a size check, and never edit the check or a document so that it passes. If restructuring is not enough, stop and ask whether the limit should move, and record the reason where the limit is set.
+- Caveat: this is a recommendation of this skill. It comes from one case, where an agent met two caps by cutting safety rules and argument help.
 
 ## Triggering / description
 - Third-person what + "Use when…" + "Not for…" boundaries. Keywords, file types, synonyms. Trigger words first. No XML. Hyphenated names without `helper`/`utils`/`claude`/`anthropic`, and no `org:` prefixes. If a target host has a scoping field (by file path, for example), use it.

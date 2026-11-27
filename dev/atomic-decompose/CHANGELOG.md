@@ -7,6 +7,10 @@ SemVer. Major: rename, trigger-scope change, removed script/flag, config schema 
 - SKILL.md frontmatter: `license: MIT` added, `metadata.owner` removed. No change in behaviour.
 - Added `annotate --item <id> --note "<direction>" [--source user|system]`: it adds a note to an item, and the item's next brief carries it as `Note [from <source>]: ...`. The note is kept as one line of at most 5,000 characters. A `done` or `dropped` item is refused, and a running item gets a warning that only a retry reads the note. `annotate --item <id> --list` prints the item's notes. A new command is a minor change, so the next release is 0.4.0.
 
+- SKILL.md section 3 moves to `references/report.md`, read when the action is `report`. The text is unchanged. SKILL.md goes from 5,998 to 5,574 characters, against its cap of 6,000.
+- `decompose.py` is split into modules, with no change in behaviour. `scripts/decompose.py` keeps the parser and the entry point, and the command to run is the same. `scripts/ad/` holds `common`, `state`, `plan`, `vcs`, `checks`, `runs` and `commands`, one per section of the old file. `shelve` moves from the commands to `runs`, where its caller is, and `LOCK_WAIT_S` moves to `state`, its only user. The selftest no longer caps the script's line count (it was 1,750). The agent runs the script and never loads it, so its length costs nothing per run, and the cap had led to argument help and blank lines being cut to fit. The 6,000-character cap on SKILL.md stays.
+- `ad/state.py`, `ad/vcs.py` and `ad/commands.py` each carry a `lint: no-dry-run: <reason>` comment. What they delete is the task's own lock, temporary file and new task folder, and a failed attempt's files after a patch of them is saved. The lint's "no `--dry-run` flag" warning is gone.
+
 ## 0.3.0 (2026-11-16)
 
 Not tagged. The number of runs that work at once is now a setting, where 0.2.0 had the fixed number 4.

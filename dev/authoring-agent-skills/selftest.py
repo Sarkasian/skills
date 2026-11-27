@@ -54,12 +54,19 @@ with tempfile.TemporaryDirectory() as tmp:
     (bad / "references" / "orphan.md").write_text("never named\n")
     (bad / "scripts" / "wipe.py").write_text("import shutil\n# --dry" "-run is only mentioned in this comment\nshutil.rmtree('out')\n")
     (bad / "scripts" / "notes.py").write_text("# send and delete are only words in a comment\nprint('ok')  # usage: notes.py\n")
+    (bad / "scripts" / "pkg").mkdir()
+    (bad / "scripts" / "pkg" / "mod.py").write_text("import shutil\nshutil.rmtree('out')\n")
+    waive = "# lint: no-dry" "-run:"
+    (bad / "scripts" / "pkg" / "own.py").write_text(f"import os\n{waive} removes only its own temp file\nos.remove('t')\n")
+    (bad / "scripts" / "pkg" / "bare.py").write_text(f"import os\n{waive}\nos.remove('t')\n")
     (bad / "scripts" / "ask.py").write_text("prompt = 'continue? '\nx = inp" + "ut(prompt)  # usage: ask.py\n")
     code, out = run("lint_skill.py", str(bad))
     w, e = " ".join(out["warnings"]), " ".join(out["errors"])
     assert "references/orphan.md is never named" in w, out
     assert "scripts/wipe.py: changes things" in w and "scripts/notes.py: changes" not in w, out
     assert "scripts/ask.py: interactive" in e, out
+    assert "scripts/pkg/mod.py: changes things" in w and "scripts/pkg/mod.py: no --help" not in w, out
+    assert "pkg/own.py" not in w and "scripts/pkg/bare.py: changes things" in w, "the waiver needs a reason: " + w
     (bad / "evals").mkdir()
     (bad / "evals" / "trigger_evals.json").write_text('{"queries": []}')
     code, out = run("lint_skill.py", str(bad))
