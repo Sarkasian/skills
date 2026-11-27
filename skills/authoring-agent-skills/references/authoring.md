@@ -33,6 +33,13 @@ Host-specific names, limits and paths are left out of this file because they cha
 - Descriptions: pushy but ≲400 chars, use case first.
 - Measure with the host's own usage and cost tools.
 
+## When a file reaches its size limit
+A size limit (the body budget above, or a cap that a skill's own tests set) keeps the skill cheap to load and stops it growing. Meet it by restructuring, never by squeezing.
+- SKILL.md: move what only one situation needs (resuming, the final report, a rare command, a long example) to `references/<situation>.md` and leave one line that says when to read it. Where a script drives the work, have its output name the file at the moment it is needed. What applies on every run stays: the core steps and the "never" rules.
+- A script: keep it in one file while it reads top to bottom. When it outgrows that, split it along its existing sections into modules beside a thin entry script, so the command the agent runs does not change. Standard library only still holds, and a cap then counts the modules together.
+- Never delete instructions, argument help, tests, sentences in the docs or blank lines to pass a size check, and never edit the check or a document so that it passes. If restructuring is not enough, stop and ask whether the limit should move, and record the reason where the limit is set.
+- Caveat: this is a recommendation of this skill. It comes from one case, where an agent met two caps by cutting safety rules and argument help.
+
 ## Triggering / description
 - Third-person what + "Use when…" + "Not for…" boundaries. Keywords, file types, synonyms. Trigger words first. No XML. Hyphenated names without `helper`/`utils`/`claude`/`anthropic`, and no `org:` prefixes. If a target host has a scoping field (by file path, for example), use it.
 - Validate with trigger evals (`references/evals.md`).

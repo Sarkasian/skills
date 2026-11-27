@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0 (2026-11-27)
+New guidance for a file that reaches its size limit. The evals have not been re-run for it.
+- `references/authoring.md`, "When a file reaches its size limit": move situational text from SKILL.md to `references/` with a load condition; split a long script into modules behind the same entry script; never delete instructions, argument help, tests or doc sentences to pass a size check; ask before a limit moves.
+- Step 5 has one hard rule that says the same.
+- Signal: an agent editing `atomic-decompose` met the SKILL.md and script caps by cutting the "never commit or revert" and "never approve for the user" rules, argument help and blank lines.
+
 ## 1.2.1 (2026-11-21)
 Tuned from the first eval run (the entry below this one's results list).
 - Description rewritten from the train failures only: leads with "creates, fixes and reviews", names a skill that is not picked up and a procedure the agent is told again and again, and excludes using an existing skill and product documents about skills. Trigger evals, 21 queries × 3 runs: train 0.692 → 0.846 (11 of 13), test 0.875 → 1.0 (8 of 8). No false triggers. Still failing: the two implicit train queries with no "skill" in them, which the host's built-in `create-rule` takes.
