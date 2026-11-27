@@ -7,7 +7,7 @@ import os
 import shlex
 
 SCHEMA = 2
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 TRIES = 3
 MAX_PARALLEL = 4
 MAX_PARALLEL_LIMIT = 64
@@ -16,8 +16,11 @@ PROJECT_CONFIG = ".atomic-decompose.json"
 CHECK_TIMEOUT_S = 600
 AUTO_FIXES = 2
 TAIL_LINES = 30
+TAIL_CHARS = 4000  # the most characters of a log an error message quotes
+NAMES_SHOWN = 20  # the most file names an error message lists
 TASK_DIR = ".atomic-decompose"
 SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "decompose.py")  # the entry script
+REPORT_DOC = os.path.join(os.path.dirname(os.path.dirname(SCRIPT)), "references", "report.md")
 LOG_EVENTS = ("compaction", "asked_again", "wrong_engagement", "tokens")
 QUESTION_TYPES = ("scope", "user_only", "confirm")
 SOURCES = ("user", "default_accepted", "default_unconfirmed")
@@ -31,7 +34,8 @@ class Fail(Exception):
 
 class Parser(argparse.ArgumentParser):
     def error(self, message):
-        raise Fail("bad_input", message, 2, "needs_fix", f"{self.prog} --help")
+        raise Fail("bad_input", message, 2, "needs_fix",
+                   self.prog.replace("decompose.py", f"python3 {shlex.quote(SCRIPT)}", 1) + " --help")
 
 
 def _now():
@@ -44,6 +48,13 @@ def _ts(text):
 
 def _csv(value):
     return [v.strip() for v in value.split(",") if v.strip()] if value else []
+
+
+def names(paths):
+    """The paths as one string, cut to the first NAMES_SHOWN with a count of the rest."""
+    paths = list(paths)
+    more = len(paths) - NAMES_SHOWN
+    return ", ".join(paths[:NAMES_SHOWN]) + (f" and {more} more" if more > 0 else "")
 
 
 def cmd_line(task, *args):

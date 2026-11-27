@@ -2,14 +2,61 @@
 
 SemVer. Major: rename, trigger-scope change, removed script/flag, config schema break. Minor: new optional config/reference, deprecation. Patch: wording fixes that pass evals.
 
-## Unreleased
+## 0.4.0 (2026-11-27)
 
-- SKILL.md frontmatter: `license: MIT` added, `metadata.owner` removed. No change in behaviour.
+Not tagged. A new command, `annotate`, and the fixes from an audit of the skill. Two of the fixes stop the script deleting or overwriting the user's files.
+
+Not tested: the task evals and the trigger evals were not rerun for this release, because they need a headless agent CLI. Nothing here was run on Windows. The selftest ran on Linux with Python 3.12.
+
+### Added
+
 - Added `annotate --item <id> --note "<direction>" [--source user|system]`: it adds a note to an item, and the item's next brief carries it as `Note [from <source>]: ...`. The note is kept as one line of at most 5,000 characters. A `done` or `dropped` item is refused, and a running item gets a warning that only a retry reads the note. `annotate --item <id> --list` prints the item's notes. A new command is a minor change, so the next release is 0.4.0.
+- `start` prints `commits` in a git repository: one sentence that names the branch (or the detached HEAD) the items are committed on and says nothing is pushed. Its `next` begins with "tell the user what `commits` says". The skill engages without being named, so the user hears where the commits go before the first one.
+- The summary that `finish` and the last `next` print has four new fields. `action` is `report`. `review_state` is `missing` when a review was due and no review was written; before, that case looked the same as "no review needed". `branches_left` lists the branches that hold an attempt that clashed on landing. `outside_patches` lists the patches described under "Fixed" below. The summary's `next` names the full path of `references/report.md` and the `mark` command.
+- `decide` prints a `next`, like every other command.
+- Every flag and argument has help text.
 
-- SKILL.md section 3 moves to `references/report.md`, read when the action is `report`. The text is unchanged. SKILL.md goes from 5,998 to 5,574 characters, against its cap of 6,000.
+### Fixed: the user's files
+
+- **A failed or blocked item no longer deletes tracked files when `--root` is below the top of the git repository.** The restore compared file names in two different forms, took every tracked file of the item for a new file, and removed it from the index and the disk. The same happened to a file whose name git prints in quotes (a `"`, a tab, a non-ASCII letter). The names are now read with `-z` and compared as they are.
+- **`plan` refuses an item over a file with uncommitted changes** (`dirty_files`), tracked or new, as `start` always did. Before, such an item committed the user's change under its own name when it passed, and reverted or deleted the file when it failed. The half-made work of an item that is still open does not count. There is no flag to override it.
+- **`finish` no longer tells the coordinator to add an item over uncommitted changes** (`uncommitted_changes`). `plan` now refuses that. The advice is to ask the user to commit, stash or undo them, and the error is `needs_user`.
+- **A saved patch is written byte for byte.** Before, a file with CRLF line ends gave a patch that did not apply, and a file that is not UTF-8 crashed `done` with a traceback after the third failed try.
+- **File names are passed to git as written** (`GIT_LITERAL_PATHSPECS=1`). Before, restoring an item's file named `a*.txt` could also revert the user's `ab.txt`, and the saved patch held both.
+- **`outside_files` tells the executor to undo only the changes it made**, and to report a changed file that is not its own. Before, it said "undo those changes", which could revert the user's edit.
+- **A worktree's tracked changes that belong to no item are saved** as `patches/<run>-outside.patch` and reported as `outside_changes`. Before, they went with the worktree without a word.
+
+### Fixed: other
+
+- **Windows: the script no longer asks whether a lock's process is alive.** It did that with `os.kill(pid, 0)`, which on Windows ends the process. On Windows a lock is now never taken over, and `task_locked` says to delete the lock file when no command is running. Not tested on Windows.
+- **`start` refuses a git repository with no commit** (`no_commit`). Before, it failed with a raw git error.
+- **Item ids in a plan file that look like generated ids (`0`, `1`, `2`) no longer merge items.** Before, the item with id `1` overwrote the item that had just been given the generated id 1, and `depends` pointed at the wrong item.
+- **Without git, a failed item's error no longer says "its files are back as they were".** Nothing is restored without git. The error says the files are left as they are.
+- **An error message quotes at most 30 lines and 4,000 characters of a log**, and reads only the end of the file. A check that printed one very long line used to put all of it in the error. Lists of file names in errors stop at 20, with a count of the rest.
+- **Two commands that find a dead lock at the same moment can no longer both take it.** The takeover is done by one command at a time, behind `.lock.takeover`. The race was found by reading the code and was not reproduced.
+- **Input that was accepted without a word is refused:** a `check_timeout_s` that is not a whole number of seconds, 1 or more (`plan_invalid`); `log --data` that is not a JSON object (`bad_input`); `"status": "dropped"` on an item that is done, running or unknown (`plan_invalid`).
+- **A handed-back task refuses every command except `status`, `next`, `resume` and `log`** (`handed_back`). Before, `plan`, `done` and others still ran on it.
+- **The script finds its `ad/` package under `python3 -P`, `-I` and `PYTHONSAFEPATH`,** and writes no `__pycache__` into the skill folder.
+- `done` records a read-only item's result path when `--result` is left out. A usage error's `next:` line is the whole `--help` command. `status` on a complete task names `finish`.
+
+### Changed
+
+- **The question round's item list is `plan_items`.** It was `plan`, the key `start` also uses for the path of `plan.json`, so on `start` the path replaced the list.
+- SKILL.md frontmatter: `license: MIT` added, `metadata.owner` removed. No change in behaviour.
+- SKILL.md section 3 moves to `references/report.md`, read when the action is `report`. The text is unchanged. SKILL.md goes from 5,998 to 5,574 characters, against its cap of 6,000. `report.md` now also covers `review_state`, `branches_left`, `outside_patches`, the branch the commits are on, and the `unmarked` mark.
 - `decompose.py` is split into modules, with no change in behaviour. `scripts/decompose.py` keeps the parser and the entry point, and the command to run is the same. `scripts/ad/` holds `common`, `state`, `plan`, `vcs`, `checks`, `runs` and `commands`, one per section of the old file. `shelve` moves from the commands to `runs`, where its caller is, and `LOCK_WAIT_S` moves to `state`, its only user. The selftest no longer caps the script's line count (it was 1,750). The agent runs the script and never loads it, so its length costs nothing per run, and the cap had led to argument help and blank lines being cut to fit. The 6,000-character cap on SKILL.md stays.
-- `ad/state.py`, `ad/vcs.py` and `ad/commands.py` each carry a `lint: no-dry-run: <reason>` comment. What they delete is the task's own lock, temporary file and new task folder, and a failed attempt's files after a patch of them is saved. The lint's "no `--dry-run` flag" warning is gone.
+- `references/recovery.md` has a section for every error code the script prints. New: `no_result`, `not_running`, `out_of_order`, `plan_invalid`, `plan_unreadable`, `files_not_found`, `nested_repo`, `no_commit`, `dirty_files`, `task_complete`, `bad_input`, `checks_failed`, `not_complete`, `handed_back`. It says what a failed item leaves behind with and without git, and what to do about a dead lock on Windows.
+- Every line that deletes a file has its own `lint: no-dry-run: <reason>` comment directly above it, in `ad/state.py`, `ad/vcs.py` and `ad/commands.py`. Each removes one of: the task's own lock, takeover marker or temporary state file; the task folder `start` just created; a failed attempt's new file, after a patch of it is saved.
+- SKILL.md is unchanged apart from its version. It is 5,574 characters, against its cap of 6,000.
+- HOW-IT-WORKS.md: the title names this version; "a conflict stops the task" is corrected (the items are redone); new sections "The user's files" and "Decisions". The decisions recorded are that the skill stays model-invoked, that `check_cmd` runs through the shell, and what is lost without git.
+
+### Tests and evals
+
+- The selftest has 18 new tests, one or more for each fix above. Each was run against the 0.3.0 script and fails there. One test runs the real command line as a subprocess from another folder, with `python3 -P` (Python 3.11 or later) and `python3 -I`. The selftest removes its temporary folder when it passes and keeps it, and prints its path, when it fails.
+- `trigger_evals.json`: 9 new negative queries that are near misses (a review of existing work, a one-file bug fix, an explanation "step by step", a question that uses the words "break down" and "plan"). It has 61 queries, 21 positive and 40 negative.
+- `evals.json`: three new cases with fixtures under `evals/files/`. Case 9 has a check that cannot pass (`failing-check/`), case 10 has three writers with separate files (`parallel-writers/`), and case 11 has an uncommitted user change in a planned file (`dirty-tree/`). Each has a `setup` list of shell commands to run in the workspace before the prompt (a `git init` and first commit, and for case 11 the uncommitted change). The eval harness is outside this repository and does not read `setup` yet. In the old cases, "batches" is now "runs", and case 7 expects the skill's name where it said the path of its SKILL.md.
+- None of the eval cases, old or new, was run for this release.
+- SKILL.md, read-only items: research items that share one local research engine are chained with `depends`, and a long research pass is allowed in the item's `goal` with a time limit. `deep-research-run` 0.2.0 relies on both.
 
 ## 0.3.0 (2026-11-16)
 

@@ -8,8 +8,7 @@ import time
 
 from ad.common import ENV_MAX_PARALLEL, Fail, MAX_PARALLEL, MAX_PARALLEL_LIMIT, _now, PROJECT_CONFIG, SCHEMA, VERSION
 
-# lint: no-dry-run: the only files removed are this task's own lock and the temporary copy of state.json
-LOCK_WAIT_S = 60
+LOCK_WAIT_S = 60  # how long a command waits for another command's lock before it gives up
 
 
 def usable_max_parallel(v):
@@ -91,6 +90,7 @@ class Task:
             os.replace(tmp, self.state_path)
         except OSError as e:
             with _quiet():
+                # lint: no-dry-run: removes only the temporary copy of state.json this call wrote
                 os.remove(tmp)
             raise Fail("state_write_failed", f"cannot write {self.state_path}: {e}; the saved state is unchanged",
                        3, "auto_retry", "fix the cause (disk, permissions), then rerun the same command")
@@ -131,20 +131,45 @@ class Task:
                 os.close(fd)
                 return
             except FileExistsError:
-                if not _holder_alive(self.lock_path):
-                    with _quiet():
-                        os.remove(self.lock_path)
+                if not _holder_alive(self.lock_path) and self._remove_dead_lock():
                     continue
                 if time.monotonic() > end:
                     raise Fail("task_locked", f"{self.lock_path} is held by a live process for over {LOCK_WAIT_S}s",
-                               3, "needs_user", "wait for the other command to end, then rerun this one")
+                               3, "needs_user", "wait for the other command to end, then rerun this one"
+                               + ("; on Windows a lock is never taken over, so if no command is running, "
+                                  "delete that file" if os.name == "nt" else ""))
                 time.sleep(0.1)
+
+    def _remove_dead_lock(self):
+        """Remove a lock whose process is gone. One command at a time does this, behind the takeover file, so
+        that two waiters cannot both see the dead lock and the second remove the lock the first then took.
+        Returns False when another command is doing it."""
+        take = self.lock_path + ".takeover"
+        try:
+            os.close(os.open(take, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except FileExistsError:
+            with _quiet():
+                if time.time() - os.path.getmtime(take) > 5:  # its command died: a takeover lasts milliseconds
+                    # lint: no-dry-run: removes only this task's own takeover marker, left by a dead command
+                    os.remove(take)
+            return False
+        try:
+            if not _holder_alive(self.lock_path):  # looked at again, now that no other command can remove it
+                with _quiet():
+                    # lint: no-dry-run: removes only this task's own lock file, whose process is gone
+                    os.remove(self.lock_path)
+        finally:
+            with _quiet():
+                # lint: no-dry-run: removes only the takeover marker this call created
+                os.remove(take)
+        return True
 
     def unlock(self):
         with _quiet(OSError, ValueError):
             with open(self.lock_path, encoding="utf-8") as f:
                 mine = int(f.read().strip()) == os.getpid()
             if mine:
+                # lint: no-dry-run: removes only this task's own lock file, which this process holds
                 os.remove(self.lock_path)
 
 
@@ -172,6 +197,8 @@ def _holder_alive(path):
         return False
     if pid <= 0:
         return False
+    if os.name == "nt":  # there os.kill(pid, 0) ends the process, so a lock is never taken over on Windows
+        return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

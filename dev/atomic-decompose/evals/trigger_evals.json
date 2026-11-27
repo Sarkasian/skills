@@ -310,5 +310,59 @@
     "should_trigger": true,
     "reply": "No preference, use your judgement.",
     "note": "[US-1.1] several parts or needs research"
+  },
+  {
+    "query": "Review the diff on this branch and tell me if anything looks wrong.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "near miss: a review of work that exists, nothing to plan or build"
+  },
+  {
+    "query": "Explain how the retry logic in client.py works, step by step.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "near miss: 'step by step', but one explanation of one file"
+  },
+  {
+    "query": "test_parse_empty in tests/test_parser.py fails with an IndexError. Fix parse() in parser.py so it passes.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "near miss: a real bug fix with a test, but one function in one file"
+  },
+  {
+    "query": "Add a --verbose flag to cli.py that turns on debug logging, and update the flag's help text.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "near miss: two parts by wording, one small edit in one file"
+  },
+  {
+    "query": "Summarise what changed between 2.0 and 2.1 in CHANGELOG.md.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "near miss: a summary, but of one given file"
+  },
+  {
+    "query": "Break this down for me: what does the plan and apply split in Terraform mean?",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "near miss: 'break down' and 'plan' as words, one concept question"
+  },
+  {
+    "query": "Rename fetch_user to get_user in users.py and update its two callers in the same file.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "near miss: several edits, one file, no unknowns"
+  },
+  {
+    "query": "Write a unit test for slugify in textutils.py that covers empty input.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "near miss: a test to write, one case in one file"
+  },
+  {
+    "query": "List what is in the .atomic-decompose/ folder. Don't resume anything, I only want the file names.",
+    "should_trigger": false,
+    "reply": "No preference, use your judgement.",
+    "note": "near miss: names the task folder, asks for one listing and says not to resume"
   }
 ]

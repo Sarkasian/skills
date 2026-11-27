@@ -11,15 +11,24 @@ from ad.common import Fail, TASK_DIR
 from ad.state import _quiet
 
 
-def git(cwd, *args, check=True, env=None):
+def git(cwd, *args, check=True, env=None, text=True):
+    """Run git in `cwd`. Paths are taken as written: a file named `a*.py` or `:x` is that file, not a pattern.
+    `text=False` gives the output as bytes, for a diff that must be kept byte for byte."""
+    env = dict(os.environ if env is None else env, GIT_LITERAL_PATHSPECS="1")
     try:
-        p = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, env=env)
+        p = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=text, env=env)
     except FileNotFoundError:
         raise Fail("git_missing", "git is not installed", 3, "needs_user", "install git, or run without it")
     if check and p.returncode != 0:
-        raise Fail("git_failed", f"git {' '.join(args)} failed in {cwd}: {(p.stderr or p.stdout).strip()[-800:]}",
+        said = p.stderr or p.stdout
+        said = said if text else said.decode("utf-8", "replace")
+        raise Fail("git_failed", f"git {' '.join(args)} failed in {cwd}: {said.strip()[-800:]}",
                    3, "needs_user", "fix the git problem it names, then rerun the same command")
     return p
+
+
+def has_commit(top):
+    return git(top, "rev-parse", "--verify", "-q", "HEAD", check=False).returncode == 0
 
 
 def git_top(path):
@@ -97,22 +106,24 @@ def save_patch(run_dir, paths, out_path):
         if os.path.exists(idx):
             shutil.copy(idx, env["GIT_INDEX_FILE"])
         add_paths(run_dir, paths, env)
-        diff = git(run_dir, "diff", "--cached", "--binary", "HEAD", "--", *paths, env=env).stdout
+        # bytes, not text: decoding would fail on a file that is not UTF-8 and would turn CRLF into LF
+        diff = git(run_dir, "diff", "--cached", "--binary", "HEAD", "--", *paths, env=env, text=False).stdout
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
+    with open(out_path, "wb") as f:
         f.write(diff)
 
 
-# lint: no-dry-run: the caller, shelve, saves the files as a patch first and leaves them alone if that fails
 def restore_paths(run_dir, paths):
-    tracked = set(git(run_dir, "ls-tree", "-r", "--name-only", "HEAD", "--", *paths).stdout.split("\n")) - {""}
-    prefix = git(run_dir, "rev-parse", "--show-prefix").stdout.strip()
-    keep = [p for p in paths if prefix + p in tracked]
+    """Put `paths` back as at HEAD: a tracked file is checked out, a file HEAD does not have is removed."""
+    # -z: names come back unquoted, and relative to run_dir, as `paths` are
+    tracked = set(git(run_dir, "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", *paths).stdout.split("\0")) - {""}
+    keep = [p for p in paths if p in tracked]
     if keep:
         git(run_dir, "checkout", "HEAD", "--", *keep)
-    gone = [p for p in paths if prefix + p not in tracked]
+    gone = [p for p in paths if p not in tracked]
     if gone:
         git(run_dir, "rm", "-q", "--cached", "--ignore-unmatch", "--", *gone, check=False)
     for p in gone:
         with _quiet():
+            # lint: no-dry-run: the caller, shelve, saved this file in a patch first and skips this when that fails
             os.remove(os.path.join(run_dir, p))

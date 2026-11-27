@@ -32,7 +32,7 @@ Pin a release with `#<tag>` (`npx skills`) or `@<tag>` (`gh skill`). `atomic-dec
 
 The skill runs a local Python script that edits your workspace files and makes one git commit per work item on your current branch.
 
-Requirements: `python3`, plus `git` and a workspace inside a git repository when a work item changes workspace files. The skill writes task state to `<workspace>/.atomic-decompose/<task-id>/`; the `.atomic-decompose/` folder holds its own `.gitignore`, so it never shows in `git status`. Parallel work runs in git worktrees inside the task folder, on `ad/<task-id>/` branches, and both are removed once the work has landed on your branch.
+Requirements: `python3`, plus `git` and a workspace inside a git repository when a work item changes workspace files. The skill writes task state to `<workspace>/.atomic-decompose/<task-id>/`; the `.atomic-decompose/` folder holds its own `.gitignore`, so it never shows in `git status`. Parallel work runs in git worktrees inside the task folder, on `ad/<task-id>/` branches. Both are removed once the work has landed on your branch, except the branch of an attempt that clashed and was redone: it is kept, and the final summary lists it in `branches_left`. Without git there are no commits, a failed item's files are not restored, and changes outside an item's files are not detected. Not tested on Windows.
 
 Parts that share no file are worked on at the same time, at most `max_parallel` of them (an integer from 1 to 64). A task takes the first of these that is set when it starts:
 

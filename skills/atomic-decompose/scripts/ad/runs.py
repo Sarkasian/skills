@@ -219,10 +219,15 @@ def shelve(task, run, paths, name):
     patch = os.path.join(task.dir, "patches", name)
     try:
         save_patch(run["dir"], paths, patch)
-    except (Fail, OSError) as e:
+    except (Fail, OSError, ValueError) as e:  # ValueError: git printed a file name that is not UTF-8
         return f"could not be saved ({e}), so its files are left as they were"
     restore_paths(run["dir"], paths)
     return f"is saved at {patch} (`git apply` it to reuse it)"
+
+
+def restored(kept):
+    """Whether `shelve` put the files back, given what it returned."""
+    return bool(kept) and kept.startswith("is saved")
 
 
 def land_run(task, st, run):
@@ -233,7 +238,8 @@ def land_run(task, st, run):
     if picks:
         p = git(top, "cherry-pick", *picks, check=False)
         if p.returncode != 0:
-            clash = git(top, "diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
+            clash = [p for p in git(top, "diff", "--name-only", "-z", "--diff-filter=U", check=False)
+                     .stdout.split("\0") if p]
             git(top, "cherry-pick", "--abort", check=False)
             if not clash:  # git refused before picking: staged or uncommitted changes in the way
                 return {"condition": "land_blocked",
@@ -258,13 +264,22 @@ def land_run(task, st, run):
             kept = shelve(task, run, [p for p in left if covered(p, it["files"])], f"{i}-{run['id']}.patch")
             if kept:
                 it["notes"].append(f"Its partial work from run {run['id']} {kept}")
-    for p, h in dirty_files(git_top(run["dir"]), run["dir"]).items():  # new files outside every item's files:
-        dest = os.path.join(st["root"], p)                               # finish lists them in untracked_left
+    left = dirty_files(git_top(run["dir"]), run["dir"])
+    for p, h in left.items():                       # new files outside every item's files:
+        dest = os.path.join(st["root"], p)          # finish lists them in untracked_left
         if untracked(h) and not os.path.lexists(dest):
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             shutil.copy2(os.path.join(run["dir"], p), dest, follow_symlinks=False)
+    outside = [p for p, h in left.items() if not untracked(h)]  # tracked edits no item owns go with the worktree
+    if outside:
+        patch = os.path.join(task.dir, "patches", f"{run['id']}-outside.patch")
+        with _quiet(Fail, OSError, ValueError):  # a patch that cannot be saved must not stop the landing
+            save_patch(run["dir"], outside, patch)
+            run["outside"] = patch
     git(top, "worktree", "remove", "--force", run["worktree"], check=False)
-    if not clash:
+    if clash:
+        run["branch_kept"] = True
+    else:
         git(top, "branch", "-D", run["branch"], check=False)
     return None
 

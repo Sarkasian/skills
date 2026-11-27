@@ -158,6 +158,8 @@ def apply_plan(st, plan, task):
         if q["answer"] is None:
             q.update(type=str(raw.get("type") or "scope"), text=str(raw.get("text") or ""),
                      default=str(raw.get("default") or ""), because=raw.get("because"))
+    # Only the items from before this call: an id the file gives a new item (0, 1, 2 ...) is the file's own name
+    # for it, and must not be read as the generated id of another new item added a moment ago.
     by_id = {it["id"]: it for it in st["items"]}
     alias, touched = {}, []
     open_states = ("pending", "failed", "blocked")
@@ -167,9 +169,16 @@ def apply_plan(st, plan, task):
             continue
         old = by_id.get(new["id"]) if new["id"] else None
         if raw.get("status") == "dropped":
-            if old is not None and old["status"] in open_states:
-                old["status"] = "dropped"
-                out["dropped"].append(old["id"])
+            if old is not None and old["status"] == "dropped":  # the same plan file, applied again
+                continue
+            if old is None or old["status"] not in open_states:
+                raise Fail("plan_invalid", f"item {new['id']} cannot be dropped: " + (
+                    "there is no such item" if old is None else f"it is {old['status']}, and only an item that "
+                    "is pending, failed or blocked can be"), 2, "needs_fix",
+                    "take its `\"status\": \"dropped\"` out of the plan file and rerun; a running item can be "
+                    "dropped after its executor has replied and `next` has run")
+            old["status"] = "dropped"
+            out["dropped"].append(old["id"])
             continue
         if old is None:
             given, new["id"] = new["id"], str(max([int(i["id"]) for i in st["items"]] + [0]) + 1)
@@ -178,9 +187,10 @@ def apply_plan(st, plan, task):
             new.update(status="pending", tries=0, notes=[], commit=None, result=None, block=None, run=None,
                        failure=None, origin="plan")
             st["items"].append(new)
-            by_id[new["id"]] = new
+            touched.append(new)
             out["added"].append(new["id"])
-        elif old["status"] in open_states:
+            continue
+        if old["status"] in open_states:
             fields = {k: new[k] for k in ("title", "goal", "covers", "files", "check_cmd", "check", "needs",
                                           "depends", "skill")}
             # Compare like with like: the item as a plan file gives it. `block --question` adds its question to the
@@ -193,7 +203,7 @@ def apply_plan(st, plan, task):
                 out["edited"].append(old["id"])
         else:
             out["kept"].append(old["id"])
-        touched.append(by_id[new["id"]])
+        touched.append(old)
     for it in touched:  # `depends` may name the plan file's own ids for new items
         it["depends"] = [alias.get(d, d) for d in it["depends"]]
     probs = plan_problems(st)
