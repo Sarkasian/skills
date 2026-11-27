@@ -70,7 +70,7 @@ def cmd_start(a):
     task = Task(tdir)
     try:
         out = apply_plan(st, plan, task)
-    except Fail:
+    except Fail:  # lint: no-dry-run: removes only the task folder this call just created
         shutil.rmtree(tdir, ignore_errors=True)
         with _quiet():
             os.rmdir(os.path.dirname(tdir))

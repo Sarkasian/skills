@@ -103,6 +103,7 @@ def save_patch(run_dir, paths, out_path):
         f.write(diff)
 
 
+# lint: no-dry-run: the caller, shelve, saves the files as a patch first and leaves them alone if that fails
 def restore_paths(run_dir, paths):
     tracked = set(git(run_dir, "ls-tree", "-r", "--name-only", "HEAD", "--", *paths).stdout.split("\n")) - {""}
     prefix = git(run_dir, "rev-parse", "--show-prefix").stdout.strip()

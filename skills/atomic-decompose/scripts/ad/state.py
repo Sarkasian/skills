@@ -8,6 +8,7 @@ import time
 
 from ad.common import ENV_MAX_PARALLEL, Fail, MAX_PARALLEL, MAX_PARALLEL_LIMIT, _now, PROJECT_CONFIG, SCHEMA, VERSION
 
+# lint: no-dry-run: the only files removed are this task's own lock and the temporary copy of state.json
 LOCK_WAIT_S = 60
 
 

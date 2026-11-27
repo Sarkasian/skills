@@ -119,13 +119,16 @@ def lint(skill: Path, portable: bool, evals_dir: Path | None = None) -> dict:
     for script in sorted((skill / "scripts").rglob("*")) if (skill / "scripts").is_dir() else []:
         if script.suffix in {".py", ".sh", ".js", ".ts"}:
             name = script.relative_to(skill).as_posix()
-            src = COMMENT_LINE.sub("", script.read_text(encoding="utf-8", errors="replace"))
+            raw = script.read_text(encoding="utf-8", errors="replace")
+            src = COMMENT_LINE.sub("", raw)
             is_test = script.stem.startswith("test_") or script.stem in {"selftest", "self_test"}
             if not is_test and script.parent.name == "scripts" and "--help" not in src and "argparse" not in src and "usage" not in src.lower():
                 warns.append(f"{name}: no --help/usage found")
             m = SIDE_EFFECT_CALL.search(src)
-            if m and "--dry-run" not in src:
-                warns.append(f"{name}: changes things ({m.group(0).strip()!r}) but has no --dry" + "-run flag")
+            # a comment "lint: no-dry-run: <reason>" in the file says a person judged the changes safe without one
+            if m and "--dry-run" not in src and not re.search(r"lint: no-dry" + r"-run:[ \t]*\w", raw):
+                warns.append(f"{name}: changes things ({m.group(0).strip()!r}) but has no --dry" + "-run flag; add one, "
+                             "or a comment 'lint: no-dry" + "-run: <reason>' if a preview would add no safety")
             if re.search(r"(?<![\w.])input\(|\bread\s+-p\s", src):
                 errors.append(f"{name}: interactive prompt; take flags/env/stdin instead")
 
