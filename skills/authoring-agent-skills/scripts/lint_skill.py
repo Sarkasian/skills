@@ -115,17 +115,19 @@ def lint(skill: Path, portable: bool, evals_dir: Path | None = None) -> dict:
         if f"references/{ref.name}" not in body:
             warns.append(f"references/{ref.name} is never named in SKILL.md; give it a load condition ('read X if Y')")
 
-    for script in sorted((skill / "scripts").glob("*")) if (skill / "scripts").is_dir() else []:
+    # rglob, so the modules behind an entry script are checked too; only a top-level script needs its own --help
+    for script in sorted((skill / "scripts").rglob("*")) if (skill / "scripts").is_dir() else []:
         if script.suffix in {".py", ".sh", ".js", ".ts"}:
+            name = script.relative_to(skill).as_posix()
             src = COMMENT_LINE.sub("", script.read_text(encoding="utf-8", errors="replace"))
             is_test = script.stem.startswith("test_") or script.stem in {"selftest", "self_test"}
-            if not is_test and "--help" not in src and "argparse" not in src and "usage" not in src.lower():
-                warns.append(f"scripts/{script.name}: no --help/usage found")
+            if not is_test and script.parent.name == "scripts" and "--help" not in src and "argparse" not in src and "usage" not in src.lower():
+                warns.append(f"{name}: no --help/usage found")
             m = SIDE_EFFECT_CALL.search(src)
             if m and "--dry-run" not in src:
-                warns.append(f"scripts/{script.name}: changes things ({m.group(0).strip()!r}) but has no --dry" + "-run flag")
+                warns.append(f"{name}: changes things ({m.group(0).strip()!r}) but has no --dry" + "-run flag")
             if re.search(r"(?<![\w.])input\(|\bread\s+-p\s", src):
-                errors.append(f"scripts/{script.name}: interactive prompt; take flags/env/stdin instead")
+                errors.append(f"{name}: interactive prompt; take flags/env/stdin instead")
 
     if SIDE_EFFECT.search(desc) and fm.get("disable-model-invocation", "").lower() != "true":
         warns.append("description mentions a side effect; consider disable-model-invocation: true (user-invoked only)")
