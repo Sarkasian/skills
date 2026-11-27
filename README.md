@@ -6,7 +6,7 @@ Agent skills in the [Agent Skills](https://agentskills.io/specification) layout:
 | --- | --- |
 | [`atomic-decompose`](skills/atomic-decompose/SKILL.md) | Plans a substantial task as small work items, asks every question it needs from you once with a default, then works to completion from saved state: small jobs in the main session, independent parts by sub-agents in parallel. |
 | [`authoring-agent-skills`](skills/authoring-agent-skills/SKILL.md) | Designs, scaffolds, lints and evaluates agent skills and plugins: picks skill, MCP server, hook or rule, writes evals first, and checks the result with bundled scripts. |
-| [`deep-research-run`](skills/deep-research-run/SKILL.md) | Researches one question with the local-deep-research (LDR) engine: picks the cheapest tool, checks claims against primary sources and writes a sourced result file with open questions. Works alone or as the skill of an `atomic-decompose` research item. |
+| [`deep-research-run`](skills/deep-research-run/SKILL.md) | Answers one research question with sources: takes the cheapest route that can answer it, reads primary sources, tags each claim by how far it was checked and lists open questions. Uses a deep-research tool when the host has one and plain search and page reads when it does not. Works on a brief from any planner, such as an `atomic-decompose` research item, or on a direct question. |
 
 ## Install
 
@@ -53,17 +53,18 @@ The skill holds principles, not host-specific facts such as frontmatter keys, fo
 
 ## deep-research-run
 
-The skill has no scripts. It needs the [local-deep-research](https://github.com/LearningCircuit/local-deep-research) MCP server, and `references/config-guide.md` lists the environment variables that server reads.
+The skill has no scripts. It needs a web search tool or a page fetch tool. A deep-research tool is optional; with the [local-deep-research](https://github.com/LearningCircuit/local-deep-research) MCP server, `references/local-deep-research.md` gives its tools and `references/local-model-setup.md` describes one example setup on a local model. The skill sends search queries and research prompts to whatever search service and model the host or engine is configured with, and it never changes that configuration.
 
 ## Develop
 
 ```bash
 python3 dev/atomic-decompose/selftest.py          # runnable check, standard library only
 python3 dev/authoring-agent-skills/selftest.py    # runnable check, standard library only
+python3 dev/deep-research-run/selftest.py         # runnable check, standard library only
 python3 skills/authoring-agent-skills/scripts/lint_skill.py skills/<skill> --portable --evals-dir dev/<skill>/evals
 ```
 
-`.github/workflows/check.yml` runs all three on every pull request and on `main`. A lint error fails the run; lint warnings are printed.
+`.github/workflows/check.yml` runs all of them on every pull request and on `main`. A lint error fails the run; lint warnings are printed.
 
 Agent evals for `authoring-agent-skills` are run by hand, not in CI. They need the Cursor CLI (`cursor-agent`), logged in:
 
