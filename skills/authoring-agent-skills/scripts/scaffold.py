@@ -6,7 +6,8 @@ Usage:
   python3 scripts/scaffold.py --name pdf-forms --dest plugins --description "..." --plugin   # plugins/pdf-forms/{manifests,skills/pdf-forms}
 Flags: --dry-run (list files, write nothing), --force (overwrite existing files).
 Prints JSON {"created" | "would_create": [...], "skill_dir": "..."}. Errors go to stderr. Exit codes: 0 ok, 1 files exist (no --force), 2 bad input or a target that cannot be written.
-A destination that is a symlink, or lies under one, is refused, also with --force.
+Nothing is written through a symlink inside the new folder: if <dest>/<name>, or a folder or file to be written in it, is a
+symlink, the run is refused, also with --force. --dest itself may be a symlink or lie under one (a linked skills folder).
 """
 from __future__ import annotations
 
@@ -40,6 +41,11 @@ def main() -> int:
         return 2
     if not 0 < len(args.description) <= 1024 or any(ord(c) < 32 or ord(c) == 127 for c in args.description):
         print("--description must be 1-1024 chars on one line, with no control characters", file=sys.stderr)
+        return 2
+    # NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR are line breaks to some YAML readers; a surrogate is how Python
+    # carries a byte of the argument that is not valid UTF-8, and it cannot be written to a file
+    if any(ord(c) in (0x85, 0x2028, 0x2029) or 0xD800 <= ord(c) <= 0xDFFF for c in args.description):
+        print("--description must be valid UTF-8 with no line-separator character (U+0085, U+2028, U+2029)", file=sys.stderr)
         return 2
 
     values = {"name": args.name, "title": args.name.replace("-", " ").title(),

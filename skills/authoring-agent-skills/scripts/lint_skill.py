@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -24,27 +25,47 @@ SKIP_DIRS = {"node_modules", "venv", "vendor", "third_party", "__pycache__", "fi
 SIDE_EFFECT = re.compile(r"\b((deploy|publish|push|send|delete|drop|merge|email)(e?s|ing)?|post(s|ing)? to)\b", re.I)
 BOUNDARY = re.compile(r"\bnot for\b|\bdo not use\b|\bnot when\b", re.I)
 HARNESS_TOOLS = re.compile(r"\b(StrReplace|Bash\(|the (Read|Write|Grep|Glob|Edit) tool|activate_skill)\b")
-# The two patterns below are written so that this file does not match them.
+# The two patterns below are written so that this file does not match them. A gap inside a pattern is capped
+# (GAP characters on one line), so no input makes a search slow.
 # Calls that change files on this machine or in the local repository. A waiver comment can cover these.
+# "merge" must end the word: git merge-base and its like only read. The last three are argument pairs, as passed
+# to subprocess or to a git(...) helper: "worktree", "remove"; "branch", "-D"; "checkout", ..., "--" (a file restore).
+GAP = r"[^\n]{0,400}"
 LOCAL_CHANGE = re.compile(
     r"os\.(remove|unlink|rmdir|removedirs|replace)\(|shutil\.(rmtree|move)\(|\.unlink\(|\brm\s+-[a-z]*[rf]"
-    r"|^\s*rm\s+[\"$\w./~-]|[\"']rm[\"'],|\bgit\s+(merge|clean|reset\s+--hard)\b|[\"']git[\"'],[^\n]*[\"'](merge|clean)[\"']", re.M)
+    r"|^[ \t]*rm\s+[\"$\w./~-]|[\"']rm[\"'],|\bgit\s+(merge|clean|reset\s+--hard)(?![\w-])"
+    r"|[\"']git[\"']," + GAP + r"[\"'](merge|clean)[\"']|[\"']worktree[\"'],\s*[\"']remove[\"']"
+    r"|[\"']branch[\"'],\s*[\"']-D[\"']|[\"']checkout[\"']," + GAP + r"[\"']--[\"']", re.M)
 # Calls that change something outside this machine or the repository. A waiver does not cover these.
+# The third form is a "push" argument in a call to a helper whose name starts with git: git(top, "push").
 REMOTE_CHANGE = re.compile(
-    r"\bgit\s+push\b|[\"']git[\"'],[^\n]*[\"']push[\"']|requests\.(post|put|patch|delete)\("
-    r"|method=[\"'](POST|PUT|PATCH|DELETE)[\"']|\bsmtplib\b|\bcurl\b[^\n]*-X\s*(POST|PUT|PATCH|DELETE)"
+    r"\bgit\s+push\b|[\"']git[\"']," + GAP + r"[\"']push[\"']|(?<![A-Za-z])git\w*\([^)\n]{0,400}[\"']push[\"']"
+    r"|requests\.(post|put|patch|delete)\("
+    r"|method=[\"'](POST|PUT|PATCH|DELETE)[\"']|\bsmtplib\b|\bcurl\b" + GAP + r"-X\s*(POST|PUT|PATCH|DELETE)"
     r"|\b(kubectl|terraform)\s+(apply|delete|destroy)|\bDROP\s+TABLE|\bDELETE\s+FROM|\bTRUNCATE\s+\w"
     r"|\b(npm|cargo)\s+publish|\btwine\s+upload|\bgh\s+pr\s+merge|\bdocker\s+push|\baws\s+s3\s+rm")
-# The flag counts only where the script defines or tests it, not where a string or comment mentions it.
-DRY_RUN_FLAG = re.compile(r"(add_argument|option|includes)\([^)\n]*--dry-run|--dry-run[|)]|==?\s*[\"']?--dry-run|argv[^\n]*--dry-run")
+# The flag counts only where the script defines or tests it, not where a string or comment mentions it:
+# an argparse, click, typer or commander option (the call may span lines), a shell case branch, a comparison,
+# a line that reads argv, a membership test ("--dry-run" in args, arg in ("-n", "--dry-run")), a case label,
+# or a "dry-run" key in an options object (Node parseArgs, yargs).
+DRY_RUN_FLAG = re.compile(
+    r"(add_argument|[oO]ption|includes)\([^)]{0,400}--dry-run|--dry-run[|)]|==?\s*[\"']?--dry-run|argv" + GAP + r"--dry-run"
+    r"|[\"']--dry-run[\"']\s+in\b|\bin\s*[(\[{][^)\]}\n]{0,400}--dry-run|\bcase\s+[\"']--dry-run|[\"']dry-run[\"']\s*:\s*\{")
 # A comment (whole line, or after code) "lint: no-dry-run: <reason of three words or more>". Group 1 is the code before it.
 WAIVER = re.compile(r"(?m)^(.*?)(?:#|//)[ \t]*lint: no-dry-run:[ \t]*\S+(?:[ \t]+\S+){2,}")
-COMMENT_LINE = re.compile(r"(?m)^\s*(#|//).*$")
-DOCSTRING = re.compile(r"(?m)^[ \t]*[rRbBuU]?(\"\"\"|''')[\s\S]*?\1")
+COMMENT_LINE = re.compile(r"(?m)^[ \t]*(#|//).*$")
+# Any triple-quoted string: one that starts its own line (a docstring), or else one that follows code (a value,
+# group 2). They are matched in order from the top of the file, so the quotes that close one string are never
+# read as the start of the next.
+TRIPLE_QUOTED = re.compile(r"(?m)^[ \t]*[rRbBuUfF]{0,2}(\"\"\"|''')[\s\S]*?\1|((\"\"\"|''')[\s\S]*?\3)")
 # A Markdown link target (its #fragment and "title" are left out), or a references/, scripts/ or assets/ path
 # anywhere in the text (so inside a command too), also behind a ${...SKILL...}/ variable.
-LINK = re.compile(r"\]\(([^)#\s]+)(?:#[^)\s]*)?(?:\s+\"[^\"]*\")?\)"
-                  r"|(?:\$\{?\w*SKILL\w*\}?/|(?<![\w./<>\\-]))((?:references|scripts|assets)[/\\][^`\s)\"',;#]*[^`\s)\"',;#.:?!*\]}|>])")
+# A leading ./ is the skill root too. Group 1 is the link target, group 3 the bare path. The target, its fragment
+# and the variable name are capped in length, and target and fragment are each matched inside a lookahead, which
+# is never re-tried shorter: so no input makes the search slow. A longer target is no path a file system holds.
+LINK = re.compile(r"\]\((?=([^)#\s]{1,500}))\1(?:#(?=([^)\s]{0,500}))\2)?(?:\s+\"[^\"]*\")?\)"
+                  r"|(?:\$\{?\w{0,40}SKILL\w{0,40}\}?/|(?<![\w./<>\\-])(?:\./)?)"
+                  r"((?:references|scripts|assets)[/\\][^`\s)\"',;#]*[^`\s)\"',;#.:?!*\]}|>])")
 
 
 def read(p: Path, errors: str = "strict") -> str:
@@ -53,6 +74,21 @@ def read(p: Path, errors: str = "strict") -> str:
             return f.read(MAX_CHARS)
     except UnicodeDecodeError as e:
         raise OSError(f"{p}: not UTF-8 ({e.reason} at byte {e.start})") from None
+
+
+def docstrings_out(code: str) -> str:
+    """Drop each triple-quoted string that starts its own line (a docstring); keep one that follows code (a value)."""
+    if '"' * 3 not in code and "'" * 3 not in code:
+        return code
+    return TRIPLE_QUOTED.sub(r"\2", code)  # group 2 is empty for a docstring
+
+
+def on_disk(test) -> bool:
+    """`test` is path.exists or path.is_dir. A name the file system refuses as too long is not there (older Pythons raise here)."""
+    try:
+        return test()
+    except OSError:
+        return False
 
 
 def scalar(val: str) -> str:
@@ -65,7 +101,7 @@ def scalar(val: str) -> str:
             return val[1:-1]
     if len(val) > 1 and val[0] == val[-1] == "'":
         return val[1:-1].replace("''", "'")
-    return re.sub(r"\s+#.*$", "", val)  # an unquoted value ends at a YAML comment
+    return re.sub(r"\s#.*$", "", val).rstrip()  # an unquoted value ends at a YAML comment
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, str], str] | None:
@@ -140,25 +176,31 @@ def lint(skill: Path, portable: bool, evals_dir: Path | None = None) -> dict:
 
     refs = sorted(p for p in (skill / "references").glob("*.md") if p.is_file()) if (skill / "references").is_dir() else []
     docs = [(md, body)] + [(r, read(r)) for r in refs]
-    if any("\\" in (m.group(1) or m.group(2)) for _, text in docs for m in LINK.finditer(text)):
+    if any("\\" in (m.group(1) or m.group(3)) for _, text in docs if "\\" in text for m in LINK.finditer(text)):
         errors.append("backslash in a file path; use forward slashes")
     for doc, text in docs:
         where = "" if doc == md else f" (named in references/{doc.name})"
         for m in LINK.finditer(text):
-            ref = m.group(1) or m.group(2)
+            ref = m.group(1) or m.group(3)
             if re.match(r"[a-z]+://|mailto:", ref) or re.search(r"[<*{$\\]", ref):
                 continue
             # a Markdown link is relative to the file that holds it, a bare path to the skill root
             target = (doc.parent if m.group(1) else skill) / ref
-            if ref.startswith("/") or ".." in Path(ref).parts:
+            outside = ref.startswith("/") or ".." in Path(ref).parts
+            if outside and m.group(1) and where and not ref.startswith("/"):
+                # a link in a reference may climb with ../ to a file of this skill: ../scripts/x.py, ../SKILL.md
+                rel = os.path.relpath(target, skill)
+                outside = rel == os.pardir or rel.startswith(os.pardir + os.sep)
+                target = skill / rel
+            if outside:
                 warns.append(f"path {ref!r} is not relative to the skill root{where}")
-            elif not target.exists():
-                if m.group(1) or target.parent.is_dir():
+            elif not on_disk(target.exists):
+                if m.group(1) or on_disk(target.parent.is_dir):
                     errors.append(f"referenced file does not exist: {ref}{where}")
                 else:  # the skill has no such folder, so this may be a path in the user's project
                     warns.append(f"{ref}{where} is not in this skill, which has no {target.parent.relative_to(skill).as_posix()}/ folder; "
                                  f"add the file, or write a path in the user's project as <project>/{ref}")
-            elif where and target.suffix == ".md" and target.relative_to(skill).as_posix() not in body:
+            elif where and target.suffix == ".md" and target != md and target.relative_to(skill).as_posix() not in body:
                 warns.append(f"references/{doc.name} names {ref}, which SKILL.md never names; keep references one level deep")
 
     for ref in refs:
@@ -176,11 +218,11 @@ def lint(skill: Path, portable: bool, evals_dir: Path | None = None) -> dict:
             continue
         raw = read(script, "replace")
         code = COMMENT_LINE.sub("", raw)
-        src = DOCSTRING.sub("", code) if script.suffix == ".py" else code
+        src = docstrings_out(code) if script.suffix == ".py" else code
         is_test = script.stem.startswith("test_") or script.stem in {"selftest", "self_test"} or "tests" in rel.parts
         if not is_test and script.parent.name == "scripts" and "--help" not in code and "argparse" not in code and "usage" not in code.lower():
             warns.append(f"{name}: no --help/usage found")
-        if not is_test and not DRY_RUN_FLAG.search(src):
+        if not is_test and not ("dry-run" in src and DRY_RUN_FLAG.search(src)):
             remote, local = REMOTE_CHANGE.search(src), LOCAL_CHANGE.search(src)
             if remote:
                 warns.append(f"{name}: changes something outside this machine ({remote.group(0).strip()!r}) but has no --dry-run flag; "

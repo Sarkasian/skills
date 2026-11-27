@@ -12,7 +12,7 @@ Host-specific names, limits and paths are left out of this file because they cha
 ## Harness-agnostic
 - Frontmatter: only `name` (1–64, lowercase-hyphen, = dir name), `description`, `license`, `compatibility` (≤500 chars), `metadata` (str→str), `allowed-tools` (experimental). Some hosts reject extra keys, others ignore them.
 - Host-only fields exist for invocation control, path scoping, model or effort pinning, forked context, hooks and argument substitution. Each one ties the skill to that host. Add one only for a named target host, after reading that host's current documentation.
-- Relative paths, forward slashes. Generic verbs ("read the file", "run `python3 scripts/<name>.py`"), not tool names. MCP tools as `Server:tool`.
+- Relative paths, forward slashes. The lint reads a bare path (`scripts/<name>.py`, with or without a leading `./`) from the skill root and a Markdown link from the file that holds it, so a reference links to a script as `[run it](../scripts/<name>.py)`. Generic verbs ("read the file", "run `python3 scripts/<name>.py`"), not tool names. MCP tools as `Server:tool`.
 - Discovery: `.agents/skills/` is the cross-host project folder. Some hosts read only their own folder; symlink that folder to `.agents/skills/`. Look up the discovery paths of each target host.
 - `AGENTS.md` is canonical; a host-specific always-on file should import it, not copy it. Nested files: closest wins.
 - Plugins: a root `plugin.json` per the Agent Plugins specification, plus the native manifest of each target host. Each host names its plugin-root variable differently and does not expand another host's, so use the right one in each native manifest.

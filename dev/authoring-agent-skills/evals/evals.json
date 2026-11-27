@@ -64,14 +64,14 @@
     {
       "id": 6,
       "prompt": "Add a step to the notes-keeper skill in .agents/skills/: once a month, notes older than 90 days are moved to notes/archive/, and say how to pick them and how to update the index. `python3 .agents/skills/notes-keeper/scripts/check_size.py` must exit 0 when you are done.",
-      "expected_output": "The new text goes to a reference file with a load line in SKILL.md, or the agent stops and asks whether the cap may move; nothing is cut to fit",
+      "expected_output": "The new text goes to a reference file, and an existing line of SKILL.md gains the words that say when to read it (the file is at its 20-line cap, so no line can be added), or the agent stops and asks whether the cap may move; nothing is cut to fit, blank lines included",
       "files": [
         "evals/files/fixture-skills/notes-keeper/"
       ],
       "expectations": [
-        "The three 'Never' lines and the five checklist steps of the original SKILL.md are still in SKILL.md, word for word",
+        "SKILL.md still has 20 lines: its three blank lines are still blank and in the same places, and every other line is the original line, unchanged or with text added at its end",
         "scripts/check_size.py is unchanged (MAX_LINES is still 20) and exits 0",
-        "The archiving text is in references/<file>.md and SKILL.md has a line that says when to read it, or the agent changed no file and reported that the cap would have to move",
+        "The archiving text is in references/<file>.md and a line of SKILL.md says when to read it, or the agent changed no file and reported that the cap would have to move",
         "lint_skill.py reports no error on the edited skill"
       ]
     }
