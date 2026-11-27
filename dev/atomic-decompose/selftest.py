@@ -21,14 +21,18 @@ from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "skills", "atomic-decompose", "scripts"))
+import ad.common  # noqa: E402
+import ad.state  # noqa: E402
 import decompose as dc  # noqa: E402
+
+C = ad.common
 
 TMP = tempfile.mkdtemp(prefix="ad-selftest-")
 os.environ["HOME"] = TMP
 # the user config path reads these before HOME, and the machine's own max_parallel must not reach the tests
 os.environ["XDG_CONFIG_HOME"] = os.path.join(TMP, ".config")
 os.environ["APPDATA"] = os.path.join(TMP, "AppData")
-os.environ.pop(dc.ENV_MAX_PARALLEL, None)
+os.environ.pop(C.ENV_MAX_PARALLEL, None)
 for k, v in {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
              "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_NOSYSTEM": "1"}.items():
     os.environ[k] = v
@@ -141,7 +145,7 @@ def test_plan_problems_all_at_once():
     for text in ("needs a `goal`", "needs `check_cmd`", "title also used", "needs `check`", "must be a path",
                  "covers R9", "depends on 7", "R1 (r1): no item", "R2 (r2): no item"):
         check(text in err, f"[W2] start lists every plan problem at once: {text}\n{err}")
-    check(not os.path.exists(os.path.join(root, dc.TASK_DIR)) or not os.listdir(os.path.join(root, dc.TASK_DIR)),
+    check(not os.path.exists(os.path.join(root, C.TASK_DIR)) or not os.listdir(os.path.join(root, C.TASK_DIR)),
           "[W12] a refused start leaves no task folder")
 
 
@@ -294,7 +298,7 @@ def test_rename_block_lock_and_read_only():
     check(open(os.path.join(r2, "README.md")).read() == "# r\n" and "before the block" in it(t, "2")["notes"][0],
           "[W14] block saves the item's partial work and puts its files back")
     open(os.path.join(t, ".lock"), "w").close()  # created by a live command that has not written its pid yet
-    with mock.patch.object(dc, "LOCK_WAIT_S", 0.3):
+    with mock.patch.object(ad.state, "LOCK_WAIT_S", 0.3):
         refused("task_locked", 3, "decide", "--question", "q", "--chosen", "c", "--because", "b", "--task", t)
     os.remove(os.path.join(t, ".lock"))
     root = repo()
@@ -410,7 +414,7 @@ def test_worktree_leftovers_are_kept():
     check(open(os.path.join(root, "helper.txt")).read() == "made by 1\n", "[W14] a worktree's stray file is kept")
     check("half done" in open(os.path.join(t, "patches", f"2-{r2['id']}.patch")).read()
           and "partial work" in " ".join(it(t, "2")["notes"]), "[W14] unfinished worktree work is saved as a patch")
-    check(sh(root, "git", "status", "--porcelain", dc.TASK_DIR) == "", "[W14] the task folder is git-ignored")
+    check(sh(root, "git", "status", "--porcelain", C.TASK_DIR) == "", "[W14] the task folder is git-ignored")
 
 
 def test_task_checks_add_a_fix_item():
@@ -612,7 +616,7 @@ def test_faults():
     check(not os.path.exists(lock), "[W12] a lock left by a dead process is taken over")
     with open(lock, "w") as f:
         f.write(str(os.getpid()))
-    with mock.patch.object(dc, "LOCK_WAIT_S", 0.2):
+    with mock.patch.object(ad.state, "LOCK_WAIT_S", 0.2):
         refused("task_locked", 3, "decide", "--question", "q3", "--chosen", "c", "--because", "b", "--task", t)
     os.remove(lock)
     with open(os.path.join(t, "state.json"), "w") as f:
@@ -642,18 +646,23 @@ def test_docs_name_real_commands():
     unprompted = {"start", "next", "status", "plan", "decide", "mark", "log", "annotate"}
     check(unprompted <= used, f"[W13] SKILL.md names every command it must: {sorted(unprompted - used)}")
     check(len(skill) <= 6000, f"[W13] SKILL.md is at most 6,000 characters ({len(skill)})")
-    # cap raised 1,600 -> 1,750 for the max_parallel settings, doctor and tune (1,596 lines on 0.2.0, 1,722 on 0.3.0);
-    # annotate takes it to 1,750
-    check(len(open(dc.SCRIPT).read().split("\n")) <= 1750, "[W13] decompose.py is at most 1,750 lines")
-    check(re.search(rf"^  version: {re.escape(dc.VERSION)}$", skill, re.M),
-          f"[W13] SKILL.md's metadata.version is the script's VERSION, {dc.VERSION}")
-    check(f"\n## {dc.VERSION} " in open(os.path.join(HERE, "CHANGELOG.md")).read(),
-          f"[W13] CHANGELOG.md has an entry for {dc.VERSION}")
+    # The cap counts decompose.py and the ad/ modules together. It was 1,750 for the one file (1,749 lines with
+    # annotate). The split into modules adds each module's docstring and imports, 65 lines, with no new behaviour:
+    # 1,815 lines, cap 1,850. AGENTS.md says what to do at the cap.
+    scripts = os.path.dirname(C.SCRIPT)
+    files = [C.SCRIPT] + [os.path.join(scripts, "ad", f) for f in sorted(os.listdir(os.path.join(scripts, "ad")))
+                          if f.endswith(".py")]
+    lines = sum(len(open(f).read().split("\n")) for f in files)
+    check(len(files) == 9 and lines <= 1850, f"[W13] decompose.py and the 8 files in ad/ are at most 1,850 lines ({lines})")
+    check(re.search(rf"^  version: {re.escape(C.VERSION)}$", skill, re.M),
+          f"[W13] SKILL.md's metadata.version is the script's VERSION, {C.VERSION}")
+    check(f"\n## {C.VERSION} " in open(os.path.join(HERE, "CHANGELOG.md")).read(),
+          f"[W13] CHANGELOG.md has an entry for {C.VERSION}")
     count = len(dc.COMMANDS) + 2  # COMMANDS leaves out start and doctor, which run without a task
     check(f"{count} commands" in open(os.path.join(HERE, "HOW-IT-WORKS.md")).read(),
           f"[W13] HOW-IT-WORKS.md gives the number of commands, {count}")
     readme = open(os.path.join(HERE, "..", "..", "README.md")).read()
-    check(dc.ENV_MAX_PARALLEL in readme and dc.PROJECT_CONFIG in readme,
+    check(C.ENV_MAX_PARALLEL in readme and C.PROJECT_CONFIG in readme,
           "[W13] README.md names the max_parallel environment variable and the project config file")
 
 
@@ -873,19 +882,19 @@ def test_report_weekly():
 
 
 def test_max_parallel_config_chain():
-    check(dc.user_config_path().startswith(TMP + os.sep) and dc.ENV_MAX_PARALLEL not in os.environ,
+    check(ad.state.user_config_path().startswith(TMP + os.sep) and C.ENV_MAX_PARALLEL not in os.environ,
           "[P5] the selftest's user config path is in its temporary folder and AD_MAX_PARALLEL is cleared")
     root = repo()
     t, out = start(root, [item("A", ["mod.py"])])
-    check(out["max_parallel"] == dc.MAX_PARALLEL and out["max_parallel_layer"] == "default"
-          and state(t)["max_parallel"] == dc.MAX_PARALLEL,
+    check(out["max_parallel"] == C.MAX_PARALLEL and out["max_parallel_layer"] == "default"
+          and state(t)["max_parallel"] == C.MAX_PARALLEL,
           "[P1] with nothing set, the task gets the default and records it")
-    with open(os.path.join(root, dc.PROJECT_CONFIG), "w") as f:
+    with open(os.path.join(root, C.PROJECT_CONFIG), "w") as f:
         json.dump({"max_parallel": 2}, f)
     _, out = start(root, [item("B", ["other.py"])])
     check(out["max_parallel"] == 2 and out["max_parallel_layer"] == "project_config",
           "[P1] .atomic-decompose.json sets the task value")
-    with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: "3"}):
+    with mock.patch.dict(os.environ, {C.ENV_MAX_PARALLEL: "3"}):
         _, out = start(root, [item("C", ["README.md"])])
         check(out["max_parallel_layer"] == "env", "[P1] AD_MAX_PARALLEL beats the project file")
         _, out = start(root, [item("D", ["README.md"])], "--max-parallel", "1")
@@ -894,12 +903,12 @@ def test_max_parallel_config_chain():
     with open(pp, "w") as f:
         json.dump({"question": "q", "requirements": ["r1"], "check_cmd": [TEST], "max_parallel": 2,
                    "items": [item("E", ["README.md"])]}, f)
-    with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: "3"}):
+    with mock.patch.dict(os.environ, {C.ENV_MAX_PARALLEL: "3"}):
         out, _ = run("start", "--root", root, "--statement", "s", "--plan", pp)
         check(out["max_parallel_layer"] == "plan", "[P1] the plan field beats the env")
     plain = plan_file([item("E2", ["README.md"])])
     for bad in ("banana", "0", "99"):
-        with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: bad}):
+        with mock.patch.dict(os.environ, {C.ENV_MAX_PARALLEL: bad}):
             err = refused("bad_input", 2, "start", "--root", root, "--statement", "s", "--plan", plain)
             check("env sets" in err and "resolves: needs_user" in err and "doctor --root" in err,
                   f"[P1] an unusable AD_MAX_PARALLEL is the user's to fix, and doctor is named: {bad}")
@@ -911,12 +920,12 @@ def test_max_parallel_config_chain():
         json.dump({**json.load(f), "max_parallel": 0}, g)
     err = refused("plan_invalid", 2, "start", "--root", root, "--statement", "s", "--plan", bad_plan)
     check("plan sets" in err and "resolves: needs_fix" in err, "[P1] an unusable plan max_parallel is refused")
-    with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: "banana"}):
+    with mock.patch.dict(os.environ, {C.ENV_MAX_PARALLEL: "banana"}):
         out, _ = run("start", "--root", root, "--statement", "s", "--plan", pp)
         check(out["max_parallel_layer"] == "plan"
               and any("env" in p for p in out["config_problems"]),
               "[P1] a setting shadowed by a higher one is a problem, not a failure")
-    cfg = dc.user_config_path()
+    cfg = ad.state.user_config_path()
     os.makedirs(os.path.dirname(cfg), exist_ok=True)
     with open(cfg, "w") as f:
         json.dump({"max_parallel": 5}, f)
@@ -938,7 +947,7 @@ def test_max_parallel_config_chain():
           and any(cfg in p for p in out["problems"]),
           "[P2] doctor says a start here would refuse the user file, and exits 0")
     root3 = repo()
-    for path, value in ((cfg, 5), (os.path.join(root3, dc.PROJECT_CONFIG), 2)):
+    for path, value in ((cfg, 5), (os.path.join(root3, C.PROJECT_CONFIG), 2)):
         with open(path, "w") as f:
             json.dump({"max_parallel": value}, f)
     _, out = start(root3, [item("E3", ["mod.py"])])
@@ -951,10 +960,10 @@ def test_max_parallel_config_chain():
     root4 = repo()
     refused("bad_input", 2, "doctor", "--root", os.path.join(TMP, "no-such-folder"))
     out, _ = run("doctor", "--root", root4)
-    check(out["max_parallel"] == dc.MAX_PARALLEL and out["layer"] == "default"
+    check(out["max_parallel"] == C.MAX_PARALLEL and out["layer"] == "default"
           and out["git"]["worktrees"] and out["cpus"],
           "[P2] doctor reports the applied setting, its layer, and git facts")
-    with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: "banana"}):
+    with mock.patch.dict(os.environ, {C.ENV_MAX_PARALLEL: "banana"}):
         out, _ = run("doctor", "--root", root4)
         check(out["max_parallel"] is None and out["layer"] == "env" and "refuses" in out["next"]
               and any("env" in p for p in out["problems"]),
@@ -962,7 +971,7 @@ def test_max_parallel_config_chain():
         out, _ = run("doctor", "--root", root4, "--max-parallel", "2")
         check(out["max_parallel"] == 2 and out["layer"] == "flag" and len(out["problems"]) == 1,
               "[P2] doctor with a usable flag reports it, and only lists the env problem below it")
-    with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: " "}):
+    with mock.patch.dict(os.environ, {C.ENV_MAX_PARALLEL: " "}):
         _, out = start(root4, [item("E5", ["mod.py"])])
         check(out["max_parallel_layer"] == "default" and "config_problems" not in out,
               "[P1] an empty AD_MAX_PARALLEL counts as not set")
@@ -1022,12 +1031,12 @@ def test_max_parallel_config_chain():
 
 
 def test_max_parallel_config_problems():
-    cfg = dc.user_config_path()
+    cfg = ad.state.user_config_path()
     os.makedirs(os.path.dirname(cfg), exist_ok=True)
     with contextlib.suppress(FileNotFoundError):
         os.remove(cfg)
     root = repo()
-    proj = os.path.join(root, dc.PROJECT_CONFIG)
+    proj = os.path.join(root, C.PROJECT_CONFIG)
     for path, text in ((proj, "{}"), (cfg, '{"note": "x"}')):
         with open(path, "w") as f:
             f.write(text)
@@ -1049,7 +1058,7 @@ def test_max_parallel_config_problems():
               and doc["max_parallel"] is None and any(proj in p for p in doc["problems"]),
               "[P6] a config file that cannot be read is a named problem, not a crash")
     for bad in ("--3", "\u00b2"):
-        with mock.patch.dict(os.environ, {dc.ENV_MAX_PARALLEL: bad}):
+        with mock.patch.dict(os.environ, {C.ENV_MAX_PARALLEL: bad}):
             refused("bad_input", 2, "start", "--root", root, "--statement", "s", "--plan",
                     plan_file([item("C", ["README.md"])]))
             doc, _ = run("doctor", "--root", root)

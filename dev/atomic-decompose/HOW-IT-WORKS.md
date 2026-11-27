@@ -65,4 +65,4 @@ Compared with 0.1.0 and the working iterations after it, the pyramid and its gro
 - union merge and merge leaves: runs share no files.
 - the add-time command lint, `shared_means`, head tracking, saved-attempt patches and the brief's auto-result marker.
 
-0.2.0 had 13 commands, and its decompose.py was 1,596 lines. 0.3.0 adds `doctor` and `tune`, so it had 15 commands and 1,722 lines. `annotate` makes it 16 commands and 1,750 lines. The last working iteration before the redesign had 23 commands and 3,762 lines. SKILL.md and recovery.md are the only docs left.
+0.2.0 had 13 commands, and its decompose.py was 1,596 lines. 0.3.0 adds `doctor` and `tune`, so it had 15 commands and 1,722 lines. `annotate` makes it 16 commands and 1,750 lines. The script is then split with no change in behaviour: `decompose.py` keeps the parser and the entry point, and seven modules in `scripts/ad/` hold the rest (`common`, `state`, `plan`, `vcs`, `checks`, `runs`, `commands`), 1,815 lines together. The last working iteration before the redesign had 23 commands and 3,762 lines. SKILL.md and recovery.md are the only docs left.
