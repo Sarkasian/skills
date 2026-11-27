@@ -212,7 +212,8 @@ with tempfile.TemporaryDirectory() as tmp:
     e = lint(str(d))[1]
     assert 'evals.json: must be a JSON object' in e and "trigger_evals.json: must be a JSON array" in e, e
     (d / "evals" / "evals.json").write_text("[" * 100000 + "]" * 100000)
-    assert "evals/evals.json: invalid JSON" in lint(str(d))[1], "deeply nested JSON is a lint error, not a crash"
+    code, e, w = lint(str(d))  # newer Pythons parse this depth, older ones raise RecursionError: an error either way
+    assert code == 1 and "evals/evals.json: " in e, "deeply nested JSON is a lint error, not a crash: " + e
     assert run("lint_skill.py", str(d), "--evals-dir", str(t / "nowhere")) == (2, {}), "a missing --evals-dir is bad input"
     (d / "SKILL.md").write_bytes(b"---\nname: evalfiles\ndescription: x\n---\n\xff\xfe\n")
     assert run("lint_skill.py", str(d)) == (2, {}), "a file that cannot be read is exit 2, not a traceback with exit 1"
