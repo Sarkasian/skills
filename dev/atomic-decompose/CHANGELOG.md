@@ -7,6 +7,8 @@ SemVer. Major: rename, trigger-scope change, removed script/flag, config schema 
 - SKILL.md frontmatter: `license: MIT` added, `metadata.owner` removed. No change in behaviour.
 - Added `annotate --item <id> --note "<direction>" [--source user|system]`: it adds a note to an item, and the item's next brief carries it as `Note [from <source>]: ...`. The note is kept as one line of at most 5,000 characters. A `done` or `dropped` item is refused, and a running item gets a warning that only a retry reads the note. `annotate --item <id> --list` prints the item's notes. A new command is a minor change, so the next release is 0.4.0.
 
+- SKILL.md section 3 moves to `references/report.md`, read when the action is `report`. The text is unchanged. SKILL.md goes from 5,998 to 5574 characters, against its cap of 6,000.
+
 ## 0.3.0 (2026-11-16)
 
 Not tagged. The number of runs that work at once is now a setting, where 0.2.0 had the fixed number 4.
