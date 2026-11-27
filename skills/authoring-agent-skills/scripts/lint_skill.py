@@ -5,7 +5,7 @@ Usage: python3 scripts/lint_skill.py <skill-dir> [--portable] [--evals-dir DIR]
   --portable   unknown frontmatter keys are errors (claude.ai / Skills API reject them).
   --evals-dir  folder holding evals.json and trigger_evals.json (default: <skill-dir>/evals).
 Prints JSON {"errors": [...], "warnings": [...], "stats": {...}} on stdout.
-Exit codes: 0 clean or warnings only, 1 errors, 2 bad input.
+Exit codes: 0 clean or warnings only, 1 lint errors, 2 bad input or a file that could not be read (message on stderr).
 """
 from __future__ import annotations
 
@@ -18,16 +18,54 @@ from pathlib import Path
 SPEC_KEYS = {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
 KNOWN_HOST_KEYS = {"disable-model-invocation", "user-invocable", "paths", "when_to_use", "context",
                    "agent", "model", "effort", "hooks", "argument-hint", "disallowed-tools"}
-SIDE_EFFECT = re.compile(r"\b(deploy|publish|push|send|delete|drop|merge|post to|email)\b", re.I)
+MAX_CHARS = 1_000_000  # read at most this much of any file; a skill file is far smaller
+# Folders under scripts/ that hold code the skill's author did not write, or files that are wrong on purpose.
+SKIP_DIRS = {"node_modules", "venv", "vendor", "third_party", "__pycache__", "fixtures", "dist", "build"}
+SIDE_EFFECT = re.compile(r"\b((deploy|publish|push|send|delete|drop|merge|email)(e?s|ing)?|post(s|ing)? to)\b", re.I)
+BOUNDARY = re.compile(r"\bnot for\b|\bdo not use\b|\bnot when\b", re.I)
 HARNESS_TOOLS = re.compile(r"\b(StrReplace|Bash\(|the (Read|Write|Grep|Glob|Edit) tool|activate_skill)\b")
-# A Markdown link target, or a references/, scripts/ or assets/ path anywhere in the text (so inside a command too).
-# Calls that change something outside the script. Written so that this file does not match its own patterns.
-SIDE_EFFECT_CALL = re.compile(
-    r"os\.(remove|unlink|rmdir)\(|shutil\.rmtree\(|\.unlink\(|\brm\s+-[a-z]*[rf]|\bgit\s+(push|merge|reset\s+--hard)"
-    r"|requests\.(post|put|patch|delete)\(|\bsmtp(?:lib)\b|\bcurl\b[^\n]*-X\s*(POST|PUT|PATCH|DELETE)"
-    r"|\b(kubectl|terraform)\s+(apply|delete|destroy)|\bDROP\s+TABLE|\bDELETE\s+FROM|\b(npm|cargo)\s+publish|\btwine\s+upload")
+# The two patterns below are written so that this file does not match them.
+# Calls that change files on this machine or in the local repository. A waiver comment can cover these.
+LOCAL_CHANGE = re.compile(
+    r"os\.(remove|unlink|rmdir|removedirs|replace)\(|shutil\.(rmtree|move)\(|\.unlink\(|\brm\s+-[a-z]*[rf]"
+    r"|^\s*rm\s+[\"$\w./~-]|[\"']rm[\"'],|\bgit\s+(merge|clean|reset\s+--hard)\b|[\"']git[\"'],[^\n]*[\"'](merge|clean)[\"']", re.M)
+# Calls that change something outside this machine or the repository. A waiver does not cover these.
+REMOTE_CHANGE = re.compile(
+    r"\bgit\s+push\b|[\"']git[\"'],[^\n]*[\"']push[\"']|requests\.(post|put|patch|delete)\("
+    r"|method=[\"'](POST|PUT|PATCH|DELETE)[\"']|\bsmtplib\b|\bcurl\b[^\n]*-X\s*(POST|PUT|PATCH|DELETE)"
+    r"|\b(kubectl|terraform)\s+(apply|delete|destroy)|\bDROP\s+TABLE|\bDELETE\s+FROM|\bTRUNCATE\s+\w"
+    r"|\b(npm|cargo)\s+publish|\btwine\s+upload|\bgh\s+pr\s+merge|\bdocker\s+push|\baws\s+s3\s+rm")
+# The flag counts only where the script defines or tests it, not where a string or comment mentions it.
+DRY_RUN_FLAG = re.compile(r"(add_argument|option|includes)\([^)\n]*--dry-run|--dry-run[|)]|==?\s*[\"']?--dry-run|argv[^\n]*--dry-run")
+# A comment (whole line, or after code) "lint: no-dry-run: <reason of three words or more>". Group 1 is the code before it.
+WAIVER = re.compile(r"(?m)^(.*?)(?:#|//)[ \t]*lint: no-dry-run:[ \t]*\S+(?:[ \t]+\S+){2,}")
 COMMENT_LINE = re.compile(r"(?m)^\s*(#|//).*$")
-LINK = re.compile(r"\]\(([^)#\s]+)\)|(?<![\w./<>-])((?:references|scripts|assets)/[^`\s)\"',;]*[^`\s)\"',;.:])")
+DOCSTRING = re.compile(r"(?m)^[ \t]*[rRbBuU]?(\"\"\"|''')[\s\S]*?\1")
+# A Markdown link target (its #fragment and "title" are left out), or a references/, scripts/ or assets/ path
+# anywhere in the text (so inside a command too), also behind a ${...SKILL...}/ variable.
+LINK = re.compile(r"\]\(([^)#\s]+)(?:#[^)\s]*)?(?:\s+\"[^\"]*\")?\)"
+                  r"|(?:\$\{?\w*SKILL\w*\}?/|(?<![\w./<>\\-]))((?:references|scripts|assets)[/\\][^`\s)\"',;#]*[^`\s)\"',;#.:?!*\]}|>])")
+
+
+def read(p: Path, errors: str = "strict") -> str:
+    try:
+        with p.open(encoding="utf-8", errors=errors) as f:
+            return f.read(MAX_CHARS)
+    except UnicodeDecodeError as e:
+        raise OSError(f"{p}: not UTF-8 ({e.reason} at byte {e.start})") from None
+
+
+def scalar(val: str) -> str:
+    if val in (">", ">-", ">+", "|", "|-", "|+"):
+        return ""
+    if len(val) > 1 and val[0] == val[-1] == '"':
+        try:
+            return str(json.loads(val))
+        except ValueError:
+            return val[1:-1]
+    if len(val) > 1 and val[0] == val[-1] == "'":
+        return val[1:-1].replace("''", "'")
+    return re.sub(r"\s+#.*$", "", val)  # an unquoted value ends at a YAML comment
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, str], str] | None:
@@ -42,8 +80,8 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], str] | None:
     for line in text[4:end].splitlines():
         m = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
         if m:
-            key, val = m.group(1), m.group(2).strip()
-            fm[key] = "" if val in (">", ">-", "|", "|-") else val.strip("'\"")
+            key = m.group(1)
+            fm[key] = scalar(m.group(2).strip())
         elif key and line.startswith((" ", "\t")):
             fm[key] = (fm[key] + " " + line.strip()).strip()
     return fm, text[end + 4:].lstrip("\n")
@@ -55,8 +93,7 @@ def lint(skill: Path, portable: bool, evals_dir: Path | None = None) -> dict:
     md = skill / "SKILL.md"
     if not md.is_file():
         return {"errors": [f"missing {md}"], "warnings": [], "stats": {}}
-    text = md.read_text(encoding="utf-8")
-    parsed = parse_frontmatter(text)
+    parsed = parse_frontmatter(read(md).lstrip("\ufeff"))
     if parsed is None:
         return {"errors": ["SKILL.md has no '---' frontmatter block"], "warnings": [], "stats": {}}
     fm, body = parsed
@@ -75,84 +112,111 @@ def lint(skill: Path, portable: bool, evals_dir: Path | None = None) -> dict:
     else:
         if len(desc) > 400:
             warns.append(f"description is {len(desc)} chars; listing budgets truncate, aim for <=400 with triggers first")
-        if re.match(r"(I|You)\b", desc) or re.search(r"\b(I can|you can)\b", desc, re.I):
+        if re.match(r"(I|You)\s", desc) or re.search(r"\b(I can|you can)\b", desc, re.I):
             warns.append("description should be third person ('Processes X...'), not 'I/You can'")
         if not re.search(r"\buse (this )?(skill )?(when|for)\b|\btriggers? on\b", desc, re.I):
             warns.append("description lacks a 'Use when ...' trigger clause")
-        if not re.search(r"\bnot for\b|\bdo not use\b|\bnot when\b", desc, re.I):
+        if not BOUNDARY.search(desc):
             warns.append("description has no 'Not for ...' boundary (add one if a near-miss skill exists)")
+        if re.search(r"</?[A-Za-z][^>]*>", desc):
+            warns.append("description holds an XML or HTML tag; some hosts reject it")
+    if len(fm.get("compatibility", "")) > 500:
+        errors.append(f"compatibility is {len(fm['compatibility'])} chars (max 500)")
 
     for k in fm.keys() - SPEC_KEYS:
         msg = f"frontmatter key {k!r} is not in the open spec" + ("" if k in KNOWN_HOST_KEYS else " and not a known host key")
         (errors if portable else warns).append(msg)
 
-    lines = body.count("\n") + 1
+    lines = len(body.rstrip("\n").splitlines())
     tokens = len(body) // 4
     if lines >= 500:
         errors.append(f"SKILL.md body is {lines} lines (keep < 500; move detail to references/)")
     if tokens > 5000:
         warns.append(f"SKILL.md body is ~{tokens} tokens (aim < 5000)")
-    if "\\" in "".join(m.group(1) or m.group(2) for m in LINK.finditer(body)):
-        errors.append("backslash in a file path; use forward slashes")
     for m in HARNESS_TOOLS.finditer(body):
         warns.append(f"harness-specific tool name {m.group(0)!r}; say 'read the file' / 'run <cmd>'")
+    if re.search(r"\bTODO\b", body):
+        warns.append("SKILL.md still holds a TODO placeholder")
 
-    for m in LINK.finditer(body):
-        ref = (m.group(1) or m.group(2)).split(" ")[0]
-        if re.match(r"[a-z]+://|mailto:", ref) or "<" in ref or "*" in ref:
-            continue
-        target = skill / ref
-        if ref.startswith("/") or ".." in Path(ref).parts:
-            warns.append(f"path {ref!r} is not relative to the skill root")
-        elif not target.exists():
-            errors.append(f"referenced file does not exist: {ref}")
-        elif target.suffix == ".md" and target.parent != skill:
-            nested = [x for x in LINK.findall(target.read_text(encoding="utf-8")) if x[0].endswith(".md") and "://" not in x[0]]
-            if nested:
-                warns.append(f"{ref} links to further .md files; keep references one level deep")
+    refs = sorted(p for p in (skill / "references").glob("*.md") if p.is_file()) if (skill / "references").is_dir() else []
+    docs = [(md, body)] + [(r, read(r)) for r in refs]
+    if any("\\" in (m.group(1) or m.group(2)) for _, text in docs for m in LINK.finditer(text)):
+        errors.append("backslash in a file path; use forward slashes")
+    for doc, text in docs:
+        where = "" if doc == md else f" (named in references/{doc.name})"
+        for m in LINK.finditer(text):
+            ref = m.group(1) or m.group(2)
+            if re.match(r"[a-z]+://|mailto:", ref) or re.search(r"[<*{$\\]", ref):
+                continue
+            # a Markdown link is relative to the file that holds it, a bare path to the skill root
+            target = (doc.parent if m.group(1) else skill) / ref
+            if ref.startswith("/") or ".." in Path(ref).parts:
+                warns.append(f"path {ref!r} is not relative to the skill root{where}")
+            elif not target.exists():
+                if m.group(1) or target.parent.is_dir():
+                    errors.append(f"referenced file does not exist: {ref}{where}")
+                else:  # the skill has no such folder, so this may be a path in the user's project
+                    warns.append(f"{ref}{where} is not in this skill, which has no {target.parent.relative_to(skill).as_posix()}/ folder; "
+                                 f"add the file, or write a path in the user's project as <project>/{ref}")
+            elif where and target.suffix == ".md" and target.relative_to(skill).as_posix() not in body:
+                warns.append(f"references/{doc.name} names {ref}, which SKILL.md never names; keep references one level deep")
 
-    for ref in sorted((skill / "references").glob("*.md")) if (skill / "references").is_dir() else []:
+    for ref in refs:
         if f"references/{ref.name}" not in body:
             warns.append(f"references/{ref.name} is never named in SKILL.md; give it a load condition ('read X if Y')")
 
     # rglob, so the modules behind an entry script are checked too; only a top-level script needs its own --help
     for script in sorted((skill / "scripts").rglob("*")) if (skill / "scripts").is_dir() else []:
-        if script.suffix in {".py", ".sh", ".js", ".ts"}:
-            name = script.relative_to(skill).as_posix()
-            raw = script.read_text(encoding="utf-8", errors="replace")
-            src = COMMENT_LINE.sub("", raw)
-            is_test = script.stem.startswith("test_") or script.stem in {"selftest", "self_test"}
-            if not is_test and script.parent.name == "scripts" and "--help" not in src and "argparse" not in src and "usage" not in src.lower():
-                warns.append(f"{name}: no --help/usage found")
-            m = SIDE_EFFECT_CALL.search(src)
-            # a comment "lint: no-dry-run: <reason>" in the file says a person judged the changes safe without one
-            if m and "--dry-run" not in src and not re.search(r"lint: no-dry" + r"-run:[ \t]*\w", raw):
-                warns.append(f"{name}: changes things ({m.group(0).strip()!r}) but has no --dry" + "-run flag; add one, "
-                             "or a comment 'lint: no-dry" + "-run: <reason>' if a preview would add no safety")
-            if re.search(r"(?<![\w.])input\(|\bread\s+-p\s", src):
-                errors.append(f"{name}: interactive prompt; take flags/env/stdin instead")
+        rel = script.relative_to(skill)
+        if script.suffix not in {".py", ".sh", ".js", ".ts"} or any(p in SKIP_DIRS or p.startswith(".") for p in rel.parts[:-1]):
+            continue
+        name = rel.as_posix()
+        if script.is_symlink() or not script.is_file():
+            warns.append(f"{name}: a symlink or not a regular file; not checked")
+            continue
+        raw = read(script, "replace")
+        code = COMMENT_LINE.sub("", raw)
+        src = DOCSTRING.sub("", code) if script.suffix == ".py" else code
+        is_test = script.stem.startswith("test_") or script.stem in {"selftest", "self_test"} or "tests" in rel.parts
+        if not is_test and script.parent.name == "scripts" and "--help" not in code and "argparse" not in code and "usage" not in code.lower():
+            warns.append(f"{name}: no --help/usage found")
+        if not is_test and not DRY_RUN_FLAG.search(src):
+            remote, local = REMOTE_CHANGE.search(src), LOCAL_CHANGE.search(src)
+            if remote:
+                warns.append(f"{name}: changes something outside this machine ({remote.group(0).strip()!r}) but has no --dry-run flag; "
+                             "add one (a 'lint: no-dry-run:' comment does not cover this)")
+            # a comment "lint: no-dry-run: <reason>" in the file says a person judged the local changes safe without one
+            elif local and not any(p.count('"') % 2 == 0 and p.count("'") % 2 == 0 for p in WAIVER.findall(raw)):
+                warns.append(f"{name}: changes things ({local.group(0).strip()!r}) but has no --dry-run flag; add one, or a comment "
+                             "'lint: no-dry-run: <reason, three words or more>' if a preview would add no safety")
+        if (script.suffix == ".py" and re.search(r"(?<![\w.])input\(|getpass\.getpass\(", src)) or \
+                (script.suffix == ".sh" and re.search(r"\bread\s+(-\w+\s+)*-\w*p", src)):
+            errors.append(f"{name}: interactive prompt; take flags/env/stdin instead")
 
-    if SIDE_EFFECT.search(desc) and fm.get("disable-model-invocation", "").lower() != "true":
-        warns.append("description mentions a side effect; consider disable-model-invocation: true (user-invoked only)")
+    if SIDE_EFFECT.search(BOUNDARY.split(desc)[0]) and fm.get("disable-model-invocation", "").lower() != "true":
+        warns.append("description mentions a side effect; make the skill user-invoked only on each target host "
+                     "(look up each host's switch; it is host-specific, so not a key for a --portable skill)")
 
-    for f in ("evals/evals.json", "evals/trigger_evals.json"):
-        p = (evals_dir or skill / "evals") / Path(f).name
+    for fname in ("evals.json", "trigger_evals.json"):
+        f, p = f"evals/{fname}", (evals_dir or skill / "evals") / fname
         if not p.is_file():
             warns.append(f"missing {f}")
             continue
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
+            data = json.loads(read(p))
+        except (json.JSONDecodeError, RecursionError) as e:
             errors.append(f"{f}: invalid JSON ({e})")
             continue
-        if f.endswith("trigger_evals.json"):
-            if not isinstance(data, list) or not all(isinstance(q, dict) for q in data):
-                errors.append(f"{f}: must be a JSON array of {{\"query\", \"should_trigger\"}} objects")
-                continue
-            pos = sum(1 for q in data if q.get("should_trigger") is True)
-            neg = sum(1 for q in data if q.get("should_trigger") is False)
-            if pos < 8 or neg < 8:
-                warns.append(f"{f}: {pos} positive / {neg} negative queries (aim 8-10 each, negatives = near-misses)")
+        if fname == "evals.json":
+            if not isinstance(data, dict) or not isinstance(data.get("evals"), list):
+                errors.append(f"{f}: must be a JSON object with an \"evals\" array")
+        elif not isinstance(data, list) or not all(
+                isinstance(q, dict) and isinstance(q.get("query"), str) and isinstance(q.get("should_trigger"), bool) for q in data):
+            errors.append(f"{f}: must be a JSON array of {{\"query\": string, \"should_trigger\": true|false}} objects")
+        else:
+            pos = sum(1 for q in data if q["should_trigger"])
+            if pos < 8 or len(data) - pos < 8:
+                warns.append(f"{f}: {pos} positive / {len(data) - pos} negative queries (aim 8-10 each, negatives = near-misses)")
 
     return {"errors": errors, "warnings": warns, "stats": {"body_lines": lines, "body_tokens_est": tokens, "description_chars": len(desc)}}
 
@@ -163,10 +227,15 @@ def main() -> int:
     ap.add_argument("--portable", action="store_true")
     ap.add_argument("--evals-dir", type=Path)
     args = ap.parse_args()
-    if not args.skill_dir.is_dir():
-        print(f"not a directory: {args.skill_dir}", file=sys.stderr)
+    for d in (args.skill_dir, args.evals_dir):
+        if d and not d.is_dir():
+            print(f"not a directory: {d}", file=sys.stderr)
+            return 2
+    try:
+        result = lint(args.skill_dir, args.portable, args.evals_dir)
+    except OSError as e:
+        print(f"could not lint: {e}", file=sys.stderr)
         return 2
-    result = lint(args.skill_dir, args.portable, args.evals_dir)
     print(json.dumps(result, indent=2))
     return 1 if result["errors"] else 0
 

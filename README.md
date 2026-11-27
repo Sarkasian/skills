@@ -81,3 +81,4 @@ Eval fixture skills are stored as `SKILL.fixture.md`, so that installers don't o
 
 - `dev/atomic-decompose/evals/files/fixture-skills/csv-profile/`. The evaluator copies it into the case workspace as `.agents/skills/csv-profile/SKILL.md`, with a `.claude/skills/csv-profile` symlink to it.
 - `dev/authoring-agent-skills/evals/files/fixture-skills/changelog-writer/`. Copy the folder into the case workspace as `.agents/skills/changelog-writer/` and rename the file to `SKILL.md`. Its defects are planted: eval 3 checks that a review finds them.
+- `dev/authoring-agent-skills/evals/files/fixture-skills/notes-keeper/`. Copy it the same way. It sits at its own 20-line cap (`scripts/check_size.py`): eval 6 checks that a change is made without cutting rules or raising the cap.

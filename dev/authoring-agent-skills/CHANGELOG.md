@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.4.0 (2026-11-27)
+
+Fixes from an audit of 1.3.0. The task evals and trigger evals have not been re-run; they need a headless agent CLI.
+
+Lint (`lint_skill.py`):
+- Change calls. The lint now knows two groups. Local changes: `os.remove`, `os.replace`, `shutil.rmtree`, `shutil.move`, `rm` in a shell line or an argument list, `git merge`, `git clean`, `git reset --hard`. Changes outside the machine or repository: `git push` (also as an argument list), `requests.post` and the like, `method="POST|PUT|PATCH|DELETE"`, `smtplib`, `curl -X`, `kubectl` and `terraform` apply or delete, `DROP TABLE`, `DELETE FROM`, `TRUNCATE`, `npm publish`, `cargo publish`, `twine upload`, `gh pr merge`, `docker push`, `aws s3 rm`. It is still a text check and does not know every form.
+- `--dry-run` counts only where the script defines or tests the flag (`add_argument("--dry-run")`, a shell `case` branch, a comparison, `argv`). A mention in a string or a trailing comment no longer counts.
+- Waiver. `lint: no-dry-run: <reason>` must be a comment, on its own line or after code, with a reason of three words or more. A string literal does not waive. The waiver is still per file and covers local changes only; a change outside the machine is reported with or without it.
+- Scripts scan. Skipped: `node_modules`, `venv`, `vendor`, `third_party`, `__pycache__`, `fixtures`, `dist`, `build` and any folder whose name starts with a dot. Test files (`test_*`, `selftest`, anything under `tests/`) get no `--dry-run` warning. A symlink or a special file is named in a warning and not read.
+- Interactive check. `input(` is checked in `.py` files only and not inside a docstring. New: `getpass.getpass(` and shell `read -rp` or `read -r -p`.
+- Paths. A `#fragment`, a link title and a trailing `?`, `!`, `*`, `]`, `}`, `|` or `>` are no longer part of a path. A path in bold, behind a `${...SKILL...}/` variable or written with a backslash is now checked. Paths named inside `references/*.md` are checked too. A bare path whose folder the skill does not have is a warning (it may be a path in the user's project); a Markdown link, or a path in a folder the skill has, stays an error.
+- One level deep. The warning now fires when a reference names an `.md` file that SKILL.md does not name, in either link form. A reference that names a file SKILL.md also names is allowed.
+- Description. Third-person verbs ("Deploys", "Publishes") now match the side-effect check, and words after "Not for" do not. The hint no longer names one host's frontmatter key. "I/O" is no longer read as first person. An XML or HTML tag is a warning.
+- Frontmatter. A UTF-8 byte order mark is accepted. A YAML comment after an unquoted value is dropped. Escapes in a double-quoted value are decoded before the length is counted. `compatibility` over 500 characters is an error.
+- Body. A 499-line body with a final newline was counted as 500; it is now 499. A `TODO` left in SKILL.md is a warning.
+- Eval files. `evals.json` must be an object with an `evals` array. Each trigger entry needs a string `query` and a true or false `should_trigger`.
+- Exit codes. 2 now also means the lint could not run: `--evals-dir` is not a folder, or a file is unreadable or not UTF-8. The message goes to stderr and nothing to stdout. Deeply nested JSON is a lint error. No file is read past 1,000,000 characters.
+
+Other scripts:
+- `scaffold.py`: a description with a control character (a newline, for example) is refused with exit 2. The description is escaped once, in a form valid in both JSON and a double-quoted YAML value, so backslashes and quotes survive. A destination that is a symlink or lies under one is refused, also with `--force`. A target that cannot be written is exit 2 with a one-line message.
+- `score_trigger_evals.py`: `should_trigger` and `triggered` must be JSON true or false and `query` a string. A line of the wrong shape, a file that is not UTF-8, a file with no runs and two runs of one query with different `should_trigger` are exit 2.
+- `assets/redirect-skill.md`: the host-specific `user-invocable` key is replaced by a comment, so the template passes `--portable`.
+
+Guidance:
+- `references/authoring.md`: the waiver text matches the lint. Dependencies are "the standard library alone, or inline script metadata with pinned package versions", and a split script keeps the entry script's rule. Removed the clause about content in the middle of a long context, which had no listed source.
+- `references/decide.md`: a script that changes things needs `--dry-run`; the `--confirm` requirement is gone. "One level deep" is defined as: SKILL.md names each reference.
+- `references/evals.md`: at least 3 cases to start, growing towards 10 to 50. Both arms of a task eval start together, each in its own clean run.
+- `references/ship.md` and step 9: a plain skill holds the version in `metadata.version`; a plugin holds the same string in every manifest too.
+- `references/sources.md`: the sentence on Vercel's evals says only that wording changed the results. It was not re-read for this release.
+- `references/runtime.md`: the example path `references/playbook.md` is now `references/<topic>.md`, because the lint checks paths in references.
+- SKILL.md: step 7 explains exit code 2. New gotcha: check the scaffolded plugin manifests against each host's manifest reference.
+
+Evals and tests:
+- Eval 4 now asks for a skill ("Make a skill so that we always run ruff before committing"). The old prompt asked for a rule, which the trigger evals say must not load this skill. Its recorded results below are for the old prompt.
+- New eval 6 with the fixture `evals/files/fixture-skills/notes-keeper/`, a skill that sits at its own 20-line cap. It checks the size-limit rule from 1.3.0. Learning L-0002 records that rule.
+- `selftest.py` has an assertion for each change above. A run of 27 single-line mutants of the scripts: 7 failed the 1.3.0 selftest, all 27 fail this one. The assertion on `scripts/notes.py` now puts a real call in a comment; before, it could not fail.
+
+Not tested:
+- Task evals 1 to 6 and the trigger evals, with this version.
+- Windows.
+- The plugin manifest templates and the URLs in `references/sources.md` against the hosts' current documentation (no network).
+- No release tag was made.
+
 ## 1.3.0 (2026-11-27)
 
 New guidance for a file that reaches its size limit. The evals have not been re-run for it.

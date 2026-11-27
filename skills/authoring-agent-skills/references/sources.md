@@ -39,7 +39,7 @@ These explain why the principles hold. They are dated articles and papers, so th
 - Skill security survey: https://snyk.io/blog/toxicskills-malicious-ai-agent-skills-clawhub/
 
 ## Where the sources disagree
-MUST vs explain-why (forced "MUST use skill" wording hurt results in Vercel's evals). Third person vs imperative descriptions (combine them). Scripts by default (Anthropic) vs instructions by default (Codex). Binary vs partial credit. One judge vs one per dimension. Grade outcome vs path (path also matters for stateful agents). Undertriggering (be "pushy") vs balance. Auto-updated vs human-gated memory. Tokens vs words for the 5k limit.
+MUST vs explain-why (Vercel's post reports that the wording of the instruction to use a skill changed the results; read it before relying on either form). Third person vs imperative descriptions (combine them). Scripts by default (Anthropic) vs instructions by default (Codex). Binary vs partial credit. One judge vs one per dimension. Grade outcome vs path (path also matters for stateful agents). Undertriggering (be "pushy") vs balance. Auto-updated vs human-gated memory. Tokens vs words for the 5k limit.
 
 ## Conventions, not host features
 These are recommendations of this skill with no host or specification behind them: the redirect skill, file + schema contracts between skills, the layered config for plain skills, `schema_version` with a migration script, and numbered steps as a help to small models (inferred from the research, not tested directly).

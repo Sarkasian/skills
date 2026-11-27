@@ -3,7 +3,7 @@ name: authoring-agent-skills
 description: "Creates, fixes and reviews agent skills (SKILL.md) and plugins: skill vs MCP vs plugin vs hook, evals, lint, description tuning. Use when creating, splitting or reviewing a skill or plugin, when a skill is not picked up, or when a procedure the agent is told again and again should load by itself. Not for ordinary code or docs, using an existing skill, or product documents about skills."
 license: MIT
 metadata:
-  version: 1.3.0
+  version: 1.4.0
 ---
 # Authoring agent skills
 
@@ -59,7 +59,7 @@ Read `references/authoring.md`. Hard rules:
 - Only add what the model gets wrong without it (the gaps from step 3).
 - Fragile, bulk or must-be-identical work goes in `scripts/`: non-interactive, `--help`, JSON on stdout, errors on stderr, distinct exit codes, idempotent, `--dry-run` if destructive. Say "Run X", never "See X".
 - Destructive or batch work: plan → validate script → apply → verify.
-- References one level deep, each with its load condition ("read X if Y").
+- References one level deep: SKILL.md names every reference with its load condition ("read X if Y"). A reference names another file only if SKILL.md names that file too.
 - At a size limit, restructure: situational text goes to `references/`, a long script becomes modules behind the same entry script. Never cut instructions, help text or tests to fit.
 - Generic verbs ("read the file", "run `python3 scripts/<name>.py`"), relative forward-slash paths, no harness tool names.
 - Frontmatter: only `name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools`, unless a target host needs more (e.g. its switch that makes a side-effecting skill user-invoked only; look the key up per host).
@@ -73,7 +73,7 @@ If the skill is multi-step, long-running or stateful, read `references/runtime.m
 
 ## 7. Lint loop
 Run: `python3 scripts/lint_skill.py <skill-dir>` (add `--portable` for skills shipped to claude.ai or other hosts; add `--evals-dir <dir>` if the evals are kept outside the skill folder).
-Fix every error; fix or consciously accept each warning. Re-run until exit code 0. Max 3 rounds, then report the remaining issues.
+Fix every error; fix or consciously accept each warning. Re-run until exit code 0. Max 3 rounds, then report the remaining issues. Exit code 2 means the lint could not read a file or folder; fix what stderr names first.
 
 ## 8. Evaluate
 - Task evals: run each case with the skill and without it (or vs the previous version), ideally in clean, separate runs (one subagent each if available). Grade expectations; compare pass rate, tokens and time.
@@ -84,7 +84,7 @@ Fix every error; fix or consciously accept each warning. Re-run until exit code 
 ## 9. Ship
 Read `references/ship.md`. Read `references/distribute.md` only if the skill ships through a marketplace or to other teams, needs usage telemetry, or is being renamed or retired. Then:
 - Side-effecting skill → user-invoked only on every target host.
-- Version: SemVer in `metadata.version` (and plugin manifests); entry in `CHANGELOG.md`. Renamed skill → leave a redirect from `assets/redirect-skill.md` under the old name.
+- Version: SemVer in `metadata.version`; in a plugin, the same string in every manifest too. Entry in `CHANGELOG.md`. Renamed skill → leave a redirect from `assets/redirect-skill.md` under the old name.
 - User config: a plugin uses the host's plugin settings; a plain skill uses layered config files read by its script. State never lives in the install directory.
 - Third-party or shared skill → security scan and a human review of scripts, hooks and MCP config.
 
@@ -98,3 +98,4 @@ State: mechanism chosen and why, files created, lint result, eval results (with 
 - Do not reuse a name an installed built-in already has (hosts ship their own skill-authoring skills); precedence differs by host.
 - Strong "MUST" wording is for invariants that evals show being broken; otherwise explain why.
 - Templates in `assets/` end in `.tmpl` so they are never discovered as nested skills.
+- The plugin manifests the scaffold writes are a starting point. Check each one against its host's current manifest reference (`references/sources.md`) before shipping.

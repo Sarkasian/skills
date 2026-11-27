@@ -5,7 +5,8 @@ Usage:
   python3 scripts/scaffold.py --name pdf-forms --dest .agents/skills --description "Fills PDF forms ... Use when ..."
   python3 scripts/scaffold.py --name pdf-forms --dest plugins --description "..." --plugin   # plugins/pdf-forms/{manifests,skills/pdf-forms}
 Flags: --dry-run (list files, write nothing), --force (overwrite existing files).
-Prints JSON {"created" | "would_create": [...], "skill_dir": "..."}. Errors go to stderr. Exit codes: 0 ok, 1 files exist (no --force), 2 bad input.
+Prints JSON {"created" | "would_create": [...], "skill_dir": "..."}. Errors go to stderr. Exit codes: 0 ok, 1 files exist (no --force), 2 bad input or a target that cannot be written.
+A destination that is a symlink, or lies under one, is refused, also with --force.
 """
 from __future__ import annotations
 
@@ -37,12 +38,13 @@ def main() -> int:
     if not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", args.name) or len(args.name) > 64:
         print("--name must be 1-64 chars of lowercase letters/digits/single hyphens", file=sys.stderr)
         return 2
-    if not 0 < len(args.description) <= 1024:
-        print("--description must be 1-1024 chars", file=sys.stderr)
+    if not 0 < len(args.description) <= 1024 or any(ord(c) < 32 or ord(c) == 127 for c in args.description):
+        print("--description must be 1-1024 chars on one line, with no control characters", file=sys.stderr)
         return 2
 
     values = {"name": args.name, "title": args.name.replace("-", " ").title(),
-              "description": args.description.replace('"', '\\"')}
+              # escaped once for both targets: a JSON string and a double-quoted YAML scalar take the same escapes
+              "description": json.dumps(args.description, ensure_ascii=False)[1:-1]}
     root = args.dest / args.name
     skill_dir = root / "skills" / args.name if args.plugin else root
     # Templates end in .tmpl so harnesses never discover assets/skill/SKILL.md as a nested skill.
@@ -52,16 +54,24 @@ def main() -> int:
     if args.plugin:
         plan += [(p, root / p.relative_to(ASSETS / "plugin")) for p in (ASSETS / "plugin").rglob("*") if p.is_file()]
 
+    links = sorted({str(p) for _, d in plan for p in (d, *d.parents) if (p == root or root in p.parents) and p.is_symlink()})
+    if links:
+        print(json.dumps({"error": "refusing to write through a symlink", "symlinks": links}), file=sys.stderr)
+        return 2
     existing = [str(d) for _, d in plan if d.exists()]
     if existing and not args.force:
         print(json.dumps({"error": "files exist; re-run with --force to overwrite", "existing": existing}), file=sys.stderr)
         return 1
     if not args.dry_run:
-        for src, dst in plan:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_text(render(src, values), encoding="utf-8")
-        for d in ("references", "scripts", "learnings/proposed"):
-            (skill_dir / d).mkdir(parents=True, exist_ok=True)
+        try:
+            for src, dst in plan:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text(render(src, values), encoding="utf-8")
+            for d in ("references", "scripts", "learnings/proposed"):
+                (skill_dir / d).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f"cannot write: {e}", file=sys.stderr)
+            return 2
     print(json.dumps({"created" if not args.dry_run else "would_create": [str(d) for _, d in plan],
                       "skill_dir": str(skill_dir)}, indent=2))
     return 0
