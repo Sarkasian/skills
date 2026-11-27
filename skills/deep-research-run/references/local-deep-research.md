@@ -53,11 +53,11 @@ Plan with the upper figure of each range in the table above.
 | `local-deep-research:detailed_research`, `iterations: 2` | 15 minutes | Yes. It needs the brief's allowance or a yes. | Yes, exactly |
 | `local-deep-research:generate_report` | 30 minutes | Yes. | No. Only when the brief gives a limit of 30 minutes or more for the pass. |
 
-With no limit in the brief, the core allows 15 minutes for one pass, 30 minutes for all passes and waiting together, and two passes with a retry counting as one. That gives:
+With no limit in the brief, the core allows 15 minutes for one pass and two passes with a retry counting as one. It sets no limit on the total time. That gives:
 
 - Breadth and deeper pass both return: 5 + 15 = 20 minutes. Both passes are used.
 - Breadth returns, the deeper pass is cut off at 15 minutes: 20 minutes and both passes are used. No retry and no wait: close the open points with search and fetch.
-- Breadth is cut off after N minutes: wait N minutes (see below), then retry once, smaller, if 5 minutes are still left of the 30. Cut off at 1 minute: 1 + 1 + 5 = 7 minutes. Cut off at 15 minutes: 15 + 15 = 30, so there is no retry.
+- Breadth is cut off after N minutes: wait N minutes (see below), then retry once, smaller. Cut off at 1 minute: 1 + 1 + 5 = 7 minutes. Cut off at 15 minutes: 15 + 15 + 5 = 35 minutes. The retry is the second pass, so there is no deeper pass.
 - A brief that gives 20 minutes for the whole item: keep about 7 for searches and step 4. That leaves 13: one breadth pass, and no deeper pass.
 
 ## Ids and late results
