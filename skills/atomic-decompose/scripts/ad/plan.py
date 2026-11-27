@@ -11,7 +11,7 @@ from ad.common import Fail, QUESTION_TYPES, TASK_DIR
 def _list(value):
     if value is None:
         return []
-    return [value] if isinstance(value, str) else list(value)
+    return list(value) if isinstance(value, (list, tuple, dict)) else [value]  # one value stands for a list of one
 
 
 def _norm_path(p):
@@ -23,7 +23,7 @@ def _norm_path(p):
 
 def read_plan_file(path):
     try:
-        text = sys.stdin.read() if path == "-" else open(path, encoding="utf-8").read()
+        text = sys.stdin.read() if path == "-" else open(path, encoding="utf-8", errors="surrogateescape").read()
         plan = json.loads(text)
     except OSError as e:
         raise Fail("plan_unreadable", f"cannot read {path}: {e}", 2)
@@ -38,6 +38,9 @@ def plan_items(plan):
     items = plan.get("items") or []
     if isinstance(items, dict):  # accept {"1": {...}} as well as a list
         items = [dict(v, id=v.get("id", k)) if isinstance(v, dict) else v for k, v in items.items()]
+    if not isinstance(items, list):
+        raise Fail("plan_invalid", f"`items` must be a list of items, not {items!r:.80}", 2, "needs_fix",
+                   "write `items` as a JSON list of objects, then rerun the same command")
     return items
 
 
@@ -88,6 +91,9 @@ def plan_problems(st):
         if not it["files"] and not (it["check"] or it["check_cmd"]):
             probs.append(f"{name}: a read-only item needs `check` (points to judge its result by)")
         for f in it["files"]:
+            if f.rstrip("/") == ".":
+                probs.append(f"{name}: file {f!r} is the whole root; name the files or folders the item changes")
+                continue
             if not f or os.path.isabs(f) or f == ".." or f.startswith("../") or "/../" in f \
                     or f.split("/")[0] in (TASK_DIR, ".git"):
                 probs.append(f"{name}: file {f!r} must be a path inside the root, not under .git/ or {TASK_DIR}/")
@@ -203,6 +209,15 @@ def apply_plan(st, plan, task):
                 out["edited"].append(old["id"])
         else:
             out["kept"].append(old["id"])
+            # An edit to an item that is running or done changes nothing, so say so instead of dropping it unseen.
+            # A question the item asked with `block` is in its needs in the state, and may not be in the file.
+            asked = {q["id"] for q in st["questions"] if q.get("origin") == "block"}
+            was, now = normalise_item(old), dict(new)
+            was["needs"], now["needs"] = ([n for n in ns if n not in asked] for ns in (was["needs"], now["needs"]))
+            if old["status"] in ("running", "done") and any(
+                    was[k] != now[k] for k in ("title", "goal", "covers", "files", "check_cmd", "check", "needs",
+                                               "depends", "skill")):
+                out.setdefault("ignored_edits", []).append(old["id"])
         touched.append(old)
     for it in touched:  # `depends` may name the plan file's own ids for new items
         it["depends"] = [alias.get(d, d) for d in it["depends"]]
@@ -223,5 +238,5 @@ def write_plan_file(task, st):
             "items": [{k: it[k] for k in ("id", "title", "goal", "covers", "files", "check_cmd", "check",
                                           "needs", "depends", "skill")}
                       for it in st["items"] if it["status"] != "dropped"]}
-    with open(task.plan_path, "w", encoding="utf-8") as f:
+    with open(task.plan_path, "w", encoding="utf-8", errors="surrogateescape") as f:
         json.dump(plan, f, ensure_ascii=False, indent=1)

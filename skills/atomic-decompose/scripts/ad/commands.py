@@ -13,10 +13,12 @@ from ad.common import (AUTO_FIXES, CHECK_TIMEOUT_S, cmd_line, _csv, ENV_MAX_PARA
                        VERSION)
 from ad.state import locked, _quiet, resolve_max_parallel, Task, usable_max_parallel, user_config_path
 from ad.plan import apply_plan, _list, _norm_path, plan_items, read_plan_file, write_plan_file
-from ad.vcs import add_paths, changed_since, covered, dirty_files, git, git_top, has_commit, head, untracked
+from ad.vcs import (add_paths, changed_since, covered, dirty_files, git, git_top, has_commit, head, ignored_files, lit,
+                    untracked)
 from ad.checks import check_unrunnable, run_checks, tail
-from ad.runs import (fail_item, item_commits, items_by_id, plan_runs, prompt_for, result_path, review_due,
-                     restored, settle_runs, shelve, start_review, start_runs, task_checks, unchanged_note)
+from ad.runs import (fail_item, item_commits, items_by_id, left_behind, outside_root, plan_runs, prompt_for,
+                     result_path, review_due, restored, settle_runs, shelve, start_review, start_runs, task_checks,
+                     unchanged_note)
 
 
 def cmd_start(a):
@@ -69,6 +71,7 @@ def cmd_start(a):
             raise Fail("nested_repo", f"{f} is in another git repository, {inner}", 1, "needs_fix",
                        f"rerun start with --root {inner} and file paths that start there")
     if top:
+        refuse_ignored(root, planned, "start")
         dirty = dirty_files(top, root)
         clash = sorted(p for p in dirty if covered(p, planned))
         if clash:
@@ -79,7 +82,7 @@ def cmd_start(a):
     task = Task(tdir)
     try:
         out = apply_plan(st, plan, task)
-    except Fail:
+    except Exception:  # a refused plan, or a fault in reading it: either way no task was made
         # lint: no-dry-run: removes only the task folder this call created a moment ago
         shutil.rmtree(tdir, ignore_errors=True)
         with _quiet():
@@ -102,6 +105,27 @@ def cmd_start(a):
     return out
 
 
+def refuse_ignored(root, files, command):
+    """An item's `done` sees a change through git status, which leaves ignored files out: an item over an ignored
+    file could never show its work or commit it."""
+    ignored = ignored_files(root, files)
+    if ignored:
+        raise Fail("ignored_files", f"git ignores these planned files, so an item could never commit them: "
+                   f"{names(ignored)}", 1, "needs_fix",
+                   "take them out of the items' `files` (build output is made by a check, not committed by an "
+                   "item); if one really is the item's work, ask the user to stop ignoring it (.gitignore); "
+                   f"then rerun {command}")
+
+
+def handed_back_next(left):
+    if not left:
+        return None
+    return ("tell the user that `worktrees_left` lists what this task leaves in the repository: each entry is a "
+            "git worktree, a folder that holds a run's unfinished work, and its branch. The user may remove them "
+            "with `git worktree remove --force <worktree>` and `git branch -D <branch>` once nothing in them is "
+            "wanted; do not remove them yourself. Then ")
+
+
 def advance(task, st):
     """The next action for the coordinator; settles returned runs and starts new ones. Caller holds the lock."""
     t = shlex.quote(task.dir)
@@ -109,7 +133,9 @@ def advance(task, st):
     if st["status"] == "complete":
         return summary(task, st)
     if st["status"] == "handed_back":
-        return {"action": "none", "next": "the task was handed back; stop using this method"}
+        left = left_behind(st)
+        return {"action": "none", **({"worktrees_left": left} if left else {}),
+                "next": (handed_back_next(left) or "") + "the task was handed back; stop using this method"}
     if st["status"] == "stopped":
         return stop_action(task, st)
     unasked = [q for q in st["questions"] if q["answer"] is None and not q["asked"] and q["origin"] == "plan"]
@@ -271,9 +297,15 @@ def cmd_plan(task, a):
                            f"{names(clash)}", 1, "needs_user",
                            "ask the user to commit, stash or undo them (never undo a change you did not make), "
                            "then rerun plan")
+            refuse_ignored(st["root"], sorted(set(wanted)), "plan")
         out = apply_plan(st, plan, task)
         task.event("plan_changed", None, out)
         task.save(st)
+        if out.get("ignored_edits"):
+            return {**out, "next": f"the edits to items {', '.join(out['ignored_edits'])} were not applied: an item "
+                                   "that is running or done is not edited. Give a running item new direction with "
+                                   f"{cmd_line(task, 'annotate', '--item', '<id>', '--note', shlex.quote('<direction>'))}"
+                                   f", and change finished work with a new item; then {cmd_line(task, 'next')}"}
         return {**out, "next": cmd_line(task, "next")}
     return locked(task, go)
 
@@ -319,8 +351,10 @@ def cmd_answer(task, a):
             task.event("answered", q["id"], {"source": source, "changed": changed})
             out.append({"id": q["id"], "answer": text, "source": source, **({"affected": affected} if changed else {})})
         task.save(st)
-        return {"answered": out, "next": cmd_line(task, "resume") if st["status"] == "stopped"
-                else cmd_line(task, "next")}
+        waiting = any(it["status"] == "blocked" and it["block"]["kind"] == "approval" for it in st["items"])
+        return {"answered": out, "next": (cmd_line(task, "resume", "--approve", "<ids>", "--deny", "<ids>")
+                                          + " as the user said" if waiting else cmd_line(task, "resume"))
+                if st["status"] == "stopped" else cmd_line(task, "next")}
     return locked(task, go)
 
 
@@ -374,6 +408,9 @@ def cmd_done(task, a):
                    and not (not it["files"] and covered(p, others))]
         stray = [p for p, h in changed.items() if not covered(p, it["files"]) and untracked(h)
                  and p not in run.get("links", [])]
+        beyond = outside_root(run, top)  # the repository outside the root, where no item has files
+        outside += [p for p, h in beyond.items() if not untracked(h)]
+        stray += [p for p, h in beyond.items() if untracked(h)]
         if outside:
             if not it["files"]:
                 raise Fail("outside_files", f"item {a.id} is read-only, but these changed: {names(outside)}",
@@ -454,7 +491,7 @@ def landed_commit(run_dir, st, it):
 def commit_item(run_dir, st, it, paths):
     add_paths(run_dir, paths)
     msg = ["-m", it["title"], "-m", f"{it['goal'][:600]}", "-m", f"AD-Item: {st['task_id']}/{it['id']}"]
-    p = git(run_dir, "commit", "-q", *msg, "--", *paths, check=False)
+    p = git(run_dir, "commit", "-q", *msg, "--", *lit(paths), check=False)
     if p.returncode != 0:
         raise Fail("commit_failed", f"git commit failed (a hook or the git identity): "
                    f"{(p.stderr or p.stdout).strip()[-800:]}", 1, "needs_fix",
@@ -503,6 +540,7 @@ def cmd_block(task, a):
             st["questions"].append(q)
             it["needs"].append(q["id"])
             block["question"] = q["id"]
+            write_plan_file(task, st)  # so that the plan file has the need too, and a later `plan` sees no edit in it
         run = next(r for r in st["runs"] if r["id"] == it["run"])
         top = git_top(run["dir"]) if st["git_top"] and it["files"] else None
         mine = [p for p in changed_since(run["dir"], top, run["snapshot"]) if covered(p, it["files"])] if top else []
@@ -568,6 +606,7 @@ def cmd_resume(task, a):
     def go(st):
         if st["status"] == "handed_back":
             return {"status": "handed_back", "next": "none: stop using this method on this task"}
+        refuse_complete(task, st)
         by = items_by_id(st)
         for ids, ok in ((_csv(a.approve), True), (_csv(a.deny), False)):
             for i in ids:
@@ -604,8 +643,15 @@ def cmd_doctor(a):
                     "changes it for the next round"}
 
 
+def refuse_complete(task, st):
+    if st["status"] == "complete":
+        raise Fail("task_complete", "the task is complete; `mark --mark reworked` reopens it", 1, "needs_fix",
+                   f"{cmd_line(task, 'finish')} prints the summary again; only the user's rework reopens the task")
+
+
 def cmd_stop(task, a):
     def go(st):
+        refuse_complete(task, st)
         do_stop(task, st, a.condition, a.detail)
         return {"status": "stopped", "next": "tell the user why; continue only after their reply, with resume"}
     return locked(task, go)
@@ -645,7 +691,9 @@ def finish_now(task, st):
     if st["git_top"]:
         for r in st["runs"]:
             if r.get("worktree") and os.path.isdir(r["worktree"]):
+                # lint: no-dry-run: a worktree this task made; every run is closed here, so its work has landed
                 git(st["git_top"], "worktree", "remove", "--force", r["worktree"], check=False)
+                # lint: no-dry-run: that worktree's own branch, which this task made
                 git(st["git_top"], "branch", "-D", r["branch"], check=False)
     st["status"] = "complete"
     st["finished_at"] = _now()
@@ -709,8 +757,11 @@ def cmd_log(task, a):
             st["status"] = "handed_back"
         task.event(a.event, a.ref, data)
         task.save(st)
-        return {"logged": a.event, "next": "carry on as normal work, without this method"
-                if a.event == "wrong_engagement" else cmd_line(task, "status")}
+        if a.event == "wrong_engagement":
+            left = left_behind(st)
+            return {"logged": a.event, **({"worktrees_left": left} if left else {}),
+                    "next": (handed_back_next(left) or "") + "carry on as normal work, without this method"}
+        return {"logged": a.event, "next": cmd_line(task, "status")}
     try:
         return locked(task, go)
     except ValueError as e:

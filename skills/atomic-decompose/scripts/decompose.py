@@ -148,6 +148,8 @@ def run(argv):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if hasattr(sys.stdout, "reconfigure"):  # a file name that is not UTF-8 is printed as its bytes, not a crash
+        sys.stdout.reconfigure(errors="surrogateescape")  # (stderr already escapes what it cannot encode)
     try:
         out = run(argv)
     except SystemExit as e:

@@ -7,7 +7,7 @@ metadata:
 ---
 # Atomic Decompose
 
-You plan and ask; the script runs the work. `ad` is `python3 <dir>/scripts/decompose.py` (`<dir>` holds this file), and `<T>` is the task folder `start` prints. Every command prints JSON with a `next` field: do what it says. On `ERROR [code]`, do its `next:` line; if that is not enough, read that code's section in `references/recovery.md`. `ad --help` lists every command.
+You plan and ask; the script runs the work. `ad` is `python3 <dir>/scripts/decompose.py` (`<dir>` holds this file and `scripts/decompose.py`), and `<T>` is the task folder `start` prints. Every command prints JSON with a `next` field: do what it says. On `ERROR [code]`, do its `next:` line; if that is not enough, read that code's section in `references/recovery.md`. `ad --help` lists every command.
 
 ## Continuing a task
 

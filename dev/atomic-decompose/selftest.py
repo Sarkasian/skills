@@ -24,6 +24,7 @@ from unittest import mock
 sys.dont_write_bytecode = True  # the tests import the skill's scripts; leave no __pycache__ beside them
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "skills", "atomic-decompose", "scripts"))
+import ad.commands  # noqa: E402
 import ad.common  # noqa: E402
 import ad.state  # noqa: E402
 import decompose as dc  # noqa: E402
@@ -120,7 +121,7 @@ def start(root, items, *extra, **kw):
 
 
 def state(t):
-    with open(os.path.join(t, "state.json")) as f:
+    with open(os.path.join(t, "state.json"), encoding="utf-8", errors="surrogateescape") as f:  # as the script reads it
         return json.load(f)
 
 
@@ -980,6 +981,381 @@ def test_every_flag_has_help():
     sub = next(a for a in dc.build_parser()._actions if isinstance(a, dc.argparse._SubParsersAction))
     bare = [f"{name} {a.dest}" for name, p in sub.choices.items() for a in p._actions if not a.help]
     check(not bare, f"[L6] every flag and argument has help text: {bare}")
+
+
+# ---------------------------------------------------------------- 0.4.0: the second review's fixes
+
+def edit_plan(t, change):
+    """Load the task's plan.json, let `change` alter it, and write it back."""
+    plan = json.loads(read(os.path.join(t, "plan.json")))
+    change(plan)
+    write(os.path.join(t, "plan.json"), json.dumps(plan))
+
+
+def test_hooks_never_see_literal_pathspecs():
+    if os.name == "nt":  # `*` cannot be in a file name there
+        return
+    hook = ('#!/bin/sh\n[ -z "$GIT_LITERAL_PATHSPECS" ] || { echo "the hook sees GIT_LITERAL_PATHSPECS" >&2; exit 1; }\n'
+            'files=$(git diff --cached --name-only -- "*.py")\n'
+            '[ -n "$files" ] || { echo "the hook\'s glob found no staged file" >&2; exit 1; }\n')
+    for sub in ("", "sub/"):  # the root is the top of the repository, then a folder below it
+        top = repo({f"{sub}a*.py": "star\n", f"{sub}ab.py": "plain\n", f"{sub}:odd.py": "odd\n",
+                    f"{sub}:del.py": "del\n", "top.txt": "t\n"})
+        root = os.path.join(top, sub).rstrip("/")
+        write(os.path.join(top, ".git", "hooks", "pre-commit"), hook)
+        os.chmod(os.path.join(top, ".git", "hooks", "pre-commit"), 0o755)
+        append(os.path.join(root, "ab.py"), "user wip\n")  # dirty before the task, and not a planned file
+        sh(root, "git", "add", "ab.py")                     # and staged, which a pattern in a git call would undo
+        t, _ = start(root, [item("Pass", ["a*.py", ":odd.py"], check_cmd=["true"]),
+                            item("Break", ["a*.py", ":odd.py", ":del.py", "a?.py"], check_cmd=[FAIL_CHECK])],
+                     "--new-files",
+                     check_cmd=())
+        append(os.path.join(root, "a*.py"), "work\n")
+        append(os.path.join(root, ":odd.py"), "work\n")
+        out, _ = run("done", "1", "--task", t)
+        shown = sh(top, "git", "show", "--format=%s", "--name-only", "-z", "HEAD")
+        check(out["commit"] and shown.replace("\n", "").rstrip("\0").split("\0")[1:] == [f"{sub}:odd.py",
+                                                                                        f"{sub}a*.py"],
+              f"[R1] a hook that lists *.py sees the staged files; the commit holds a*.py and :odd.py only "
+              f"(root {sub or '.'})")
+        for name in ("a*.py", ":odd.py", "a?.py"):  # a?.py is new, and as a pattern it would match ab.py
+            append(os.path.join(root, name), "attempt\n")
+        os.remove(os.path.join(root, ":del.py"))
+        fail_three(t, "2")
+        check(read(os.path.join(root, "a*.py")) == "star\nwork\n" and read(os.path.join(root, ":odd.py")) == "odd\nwork\n"
+              and not os.path.exists(os.path.join(root, "a?.py")) and read(os.path.join(root, ":del.py")) == "del\n"
+              and read(os.path.join(root, "ab.py")) == "plain\nuser wip\n"
+              and sh(top, "git", "status", "--porcelain") == f"M  {sub}ab.py\n",
+              f"[R1] files named a*.py, :odd.py and a?.py are restored alone; the user's ab.py stays as it was, staged "
+              f"(root {sub or '.'})")
+        patch = read(os.path.join(t, "patches", "2.patch"))
+        check("attempt" in patch and "user wip" not in patch and "deleted file" in patch,
+              "[R1] and the saved patch holds those files only, the deleted :del.py among them")
+
+
+def below_top():
+    top = repo({"pkg/mod.py": "A = 1\n", "pkg/other.py": "X = 1\n", "pkg/third.py": "T = 1\n", "top.txt": "top\n",
+                "user.txt": "u\n"})
+    return top, os.path.join(top, "pkg")
+
+
+def test_worktree_runs_with_the_root_below_the_top():
+    top, root = below_top()
+    t, _ = start(root, [item("Mod", ["mod.py"], check_cmd=["true"]), item("Other", ["other.py"], check_cmd=["true"]),
+                        item("Third", ["third.py"], check_cmd=[FAIL_CHECK])], check_cmd=())
+    r1, r2, r3 = state(t)["runs"]
+    check(all(r["worktree"] and r["dir"] == os.path.join(r["worktree"], "pkg") for r in (r1, r2, r3)),
+          "[R2] each run works in the root's folder inside its own worktree")
+    append(os.path.join(r1["dir"], "mod.py"), "A = 2\n")
+    append(os.path.join(r1["worktree"], "top.txt"), "an edit outside the root\n")
+    err = refused("outside_files", 1, "done", "1", "--task", t)
+    check("../top.txt" in err, "[R2] done refuses a tracked change outside the root, in a worktree")
+    write(os.path.join(r1["worktree"], "top.txt"), "top\n")
+    write(os.path.join(r1["worktree"], "new-outside.txt"), "new\n")
+    out, _ = run("done", "1", "--task", t)
+    check(out["not_committed"] == ["../new-outside.txt"], "[R2] a new file outside the root is named, not committed")
+    append(os.path.join(r2["dir"], "other.py"), "X = 2\n")
+    run("done", "2", "--task", t)
+    append(os.path.join(r2["worktree"], "top.txt"), "a late edit outside the root\n")  # after its last done
+    append(os.path.join(r3["dir"], "third.py"), "T = 2\n")
+    err = fail_three(t, "3")
+    check("back as they were" in err and read(os.path.join(r3["dir"], "third.py")) == "T = 1\n"
+          and "T = 2" in read(os.path.join(t, "patches", "3.patch")),
+          "[R2] a failed item in a worktree below the top is restored, and its diff kept")
+    out, _ = run("next", "--task", t)
+    patch = os.path.join(t, "patches", f"{r2['id']}-outside.patch")
+    check(out["outside_changes"]["patches"] == [patch] and "a late edit outside the root" in read(patch),
+          "[R2] a worktree's tracked change outside the root is saved as a patch when the run lands")
+    check(read(os.path.join(top, "new-outside.txt")) == "new\n" and read(os.path.join(top, "top.txt")) == "top\n"
+          and sh(top, "git", "status", "--porcelain") == "?? new-outside.txt\n",
+          "[R2] and its new file there is copied to the main folder; nothing else is left changed")
+    check(log_subjects(top)[:2] == ["Other", "Mod"], "[R2] both items landed")
+
+
+def test_in_place_run_with_the_root_below_the_top():
+    top, root = below_top()
+    append(os.path.join(top, "user.txt"), "the user's own work, from before the task\n")
+    t, out = start(root, [item("Mod", ["mod.py"], check_cmd=["true"])], check_cmd=())
+    check(out["action"] == "do_yourself", "[R2] one run works in place")
+    append(os.path.join(root, "mod.py"), "A = 2\n")
+    append(os.path.join(top, "top.txt"), "an edit outside the root\n")
+    err = refused("outside_files", 1, "done", "1", "--task", t)
+    check("../top.txt" in err and "user.txt" not in err,
+          "[R2] done refuses a tracked change outside the root, and not what was changed before the run")
+    write(os.path.join(top, "top.txt"), "top\n")
+    out, _ = run("done", "1", "--task", t)
+    check(out["status"] == "done" and sh(top, "git", "status", "--porcelain") == " M user.txt\n",
+          "[R2] with the change undone the item commits, and the user's file is as it was")
+
+
+def test_handing_back_names_what_is_left():
+    root = repo()
+    t, _ = start(root, [item("Mod", ["mod.py"]), item("Other", ["other.py"])])
+    runs = state(t)["runs"]
+    append(os.path.join(runs[0]["dir"], "mod.py"), "# unfinished\n")
+    out, _ = run("log", "wrong_engagement", "--task", t)
+    left = out["worktrees_left"]
+    check([(x["worktree"], x["branch"]) for x in left] == [(r["worktree"], r["branch"]) for r in runs]
+          and all(os.path.isdir(x["worktree"]) for x in left) and left[0]["items"] == ["1"],
+          "[R3] handing a task back lists each worktree and branch it leaves")
+    check("tell the user" in out["next"] and "git worktree remove" in out["next"] and "git branch -D" in out["next"]
+          and "do not remove them yourself" in out["next"] and out["next"].endswith("without this method"),
+          "[R3] and says how the user removes them")
+    out, _ = run("next", "--task", t)
+    check(out["action"] == "none" and out["worktrees_left"] == left and "# unfinished" in read(
+        os.path.join(runs[0]["dir"], "mod.py")), "[R3] next lists them again, and the unfinished work is still there")
+    refused("handed_back", 1, "done", "1", "--task", t)
+    t, _ = start(root, [item("Solo", ["README.md"])])
+    out, _ = run("log", "wrong_engagement", "--task", t)
+    check("worktrees_left" not in out and out["next"] == "carry on as normal work, without this method",
+          "[R3] a task with no worktree hands back as before")
+
+
+def test_a_wrong_check_goes_through_the_user():
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"], check_cmd=["no-such-command-xyz"])], check_cmd=())
+    append(os.path.join(root, "mod.py"), "#\n")
+    refused("check_broken", 1, "done", "1", "--task", t)
+    run("block", "1", "--question", "the check is wrong", "--task", t)
+    out, _ = run("next", "--task", t)
+    check(out["action"] == "stop" and out["condition"] == "needs_user", "[R4] a wrong check stops the task")
+    refused("task_stopped", 1, "plan", "--task", t)
+    run("answer", "--id", "Q1", "--text", "use true", "--task", t)
+    run("resume", "--task", t)
+    edit_plan(t, lambda p: p["items"][0].update(check_cmd=["true"]))
+    out, _ = run("plan", "--task", t)
+    check(out["edited"] == ["1"], "[R4] after the user's reply and resume, plan takes the new check")
+    run("next", "--task", t)
+    append(os.path.join(root, "mod.py"), "#\n")
+    run("done", "1", "--task", t)
+    check(it(t, "1")["status"] == "done", "[R4] and the item reruns with it")
+    section = read(os.path.join(os.path.dirname(C.REPORT_DOC), "recovery.md")).split("## check_broken")[1].split("##")[0]
+    check(0 < section.find("`answer`") < section.find("`resume`") < section.find("run `plan`"),
+          "[R4] recovery.md gives that order: answer, resume, then plan")
+
+
+def test_a_complete_task_stays_complete():
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"])])
+    append(os.path.join(root, "mod.py"), "#\n")
+    run("done", "1", "--task", t)
+    out, _ = run("next", "--task", t)
+    check(out["status"] == "complete", "[R5] the task is complete")
+    err = refused("task_complete", 1, "resume", "--task", t)
+    check(" finish " in err, "[R5] resume on a complete task is refused, and names finish")
+    refused("task_complete", 1, "stop", "--condition", "user", "--detail", "d", "--task", t)
+    check(state(t)["status"] == "complete" and state(t)["stop"] is None, "[R5] neither reopens it")
+    run("mark", "--mark", "reworked", "--reason", "more", "--task", t)
+    check(state(t)["status"] == "active", "[R5] the user's rework still does")
+
+
+def test_an_answered_block_is_no_edit():
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"], check_cmd=[FAIL_CHECK])], check_cmd=())
+    append(os.path.join(root, "mod.py"), "#\n")
+    refused("check_failed", 1, "done", "1", "--task", t)
+    run("block", "1", "--question", "Which?", "--task", t)
+    plan = json.loads(read(os.path.join(t, "plan.json")))
+    check(plan["items"][0]["needs"] == ["Q1"] and plan["questions"][0]["text"] == "Which?",
+          "[R6] block writes the question and the item's need of it into plan.json")
+    run("next", "--task", t)
+    run("answer", "--id", "Q1", "--text", "this", "--task", t)
+    run("resume", "--task", t)
+    out, _ = run("plan", "--task", t)
+    check(out["edited"] == [] and it(t, "1")["tries"] == 1 and it(t, "1")["needs"] == ["Q1"],
+          "[R6] a plan after the answer does not count the item as edited: its tries and its need stay")
+
+
+def test_a_rework_gets_a_fresh_review():
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"])], "--mode", "delegate")
+    append(os.path.join(root, "mod.py"), "#\n")
+    run("done", "1", "--task", t)
+    run("next", "--task", t)
+    write(os.path.join(t, "review.md"), "the first review\n")
+    run("next", "--task", t)
+    run("finish", "--task", t)
+    run("mark", "--mark", "reworked", "--reason", "more", "--task", t)
+    edit_plan(t, lambda p: p["items"].append(item("B", ["other.py"])))
+    run("plan", "--task", t)
+    run("next", "--task", t)
+    append(os.path.join(root, "other.py"), "#\n")
+    run("done", "2", "--task", t)
+    for _ in (1, 2):  # the second review's executor writes nothing, twice
+        out, _ = run("next", "--task", t)
+        check(out["action"] == "review" and not os.path.exists(os.path.join(t, "review.md")),
+              "[R7] the review from before the rework is moved out of the way")
+    out, _ = run("next", "--task", t)
+    kept = [f for f in os.listdir(t) if f.startswith("review-before-")]
+    check(out["action"] == "report" and out["review"] is None and out["review_state"] == "missing"
+          and len(kept) == 1 and read(os.path.join(t, kept[0])) == "the first review\n",
+          "[R7] so it does not pass for the new review, and it is kept under another name")
+
+
+def test_a_file_name_that_is_not_utf8():
+    root = repo()
+    try:
+        for name in (b"caf\xe9.txt", b"caf\xe9-tracked.txt"):
+            with open(os.path.join(os.fsencode(root), name), "wb") as f:
+                f.write(b"x\n")
+    except OSError:  # this file system takes only UTF-8 names
+        return
+    sh(root, "git", "add", "caf\udce9-tracked.txt")
+    sh(root, "git", "commit", "-qm", "odd name")
+    t, _ = start(root, [item("A", ["mod.py"]), item("Odd", ["caf\udce9-tracked.txt"], check_cmd=["true"])],
+                 "--max-parallel", "1")
+    check("caf\udce9.txt" in state(t)["start_dirty"], "[R8] start reads a file name that is not UTF-8, and keeps it")
+    append(os.path.join(root, "mod.py"), "#\n")
+    with open(os.path.join(os.fsencode(root), b"new-\xe9.txt"), "wb") as f:
+        f.write(b"n\n")
+    out, _ = run("done", "1", "--task", t)
+    check(out["not_committed"] == ["new-\udce9.txt"], "[R8] done names a new file whose name is not UTF-8")
+    with open(os.path.join(os.fsencode(root), b"caf\xe9-tracked.txt"), "ab") as f:
+        f.write(b"y\n")
+    out, _ = run("done", "2", "--task", t)
+    left = subprocess.run(["git", "status", "--porcelain", "-z"], cwd=root, capture_output=True).stdout
+    check(out["commit"] and b"tracked" not in left,
+          "[R8] an item commits a file whose name is not UTF-8")
+    strict = {**os.environ, "PYTHONIOENCODING": "utf-8:strict"}  # as in a UTF-8 locale; the C locale escapes anyway
+    p = subprocess.run([sys.executable, C.SCRIPT, "next", "--task", t], capture_output=True, env=strict)
+    check(p.returncode == 0 and b"new-\xe9.txt" in p.stdout and b'"status": "complete"' in p.stdout,
+          f"[R8] the real command line prints such a name as its bytes, and finishes the task\n{p.stderr!r}")
+
+
+def test_plan_values_of_the_wrong_shape():
+    root = repo()
+    good = item("A", ["mod.py"])
+
+    def plan_with(**over):
+        path = plan_file([good])
+        write(path, json.dumps({**json.loads(read(path)), **over}))
+        return path
+    err = refused("plan_invalid", 2, "start", "--root", root, "--statement", "s", "--plan", plan_with(items=5))
+    check("`items` must be a list" in err, "[R9] `items` that is not a list is a plan problem, not a traceback")
+    refused("plan_invalid", 2, "start", "--root", root, "--statement", "s", "--plan", plan_with(items="abc"))
+    refused("files_not_found", 1, "start", "--root", root, "--statement", "s", "--plan",
+            plan_with(items=[dict(good, files=5)]))
+    refused("plan_invalid", 2, "start", "--root", root, "--statement", "s", "--plan",
+            plan_with(items=[dict(good, covers=7)]))
+    out, _ = run("start", "--root", root, "--statement", "s", "--plan", plan_with(requirements=5))
+    check(state(out["task_dir"])["requirements"] == ["5"], "[R9] one value where a list is wanted is a list of one")
+    for whole in (".", "./.", "./"):
+        err = refused("plan_invalid", 2, "start", "--root", root, "--statement", "s", "--plan",
+                      plan_with(items=[dict(good, files=[whole])]))
+        check("whole root" in err or "must be a path inside the root" in err,
+              f"[R10] an item over the whole root is refused: {whole!r}")
+    err = refused("plan_invalid", 2, "start", "--root", root, "--statement", "s", "--plan",
+                  plan_with(items=[dict(good, files=["."])]))
+    check("whole root" in err, "[R10] `.` is named as the whole root")
+    bare = os.path.join(TMP, "bare-folder")
+    os.makedirs(bare)
+    write(os.path.join(bare, "mod.py"), "A = 1\n")
+    with mock.patch.object(ad.commands, "apply_plan", side_effect=RuntimeError("a fault while reading the plan")):
+        try:
+            run("start", "--root", bare, "--statement", "s", "--plan", plan_with(check_cmd=["true"]))
+            check(False, "[R9] the fault is raised")
+        except RuntimeError:
+            pass
+    check(not os.path.exists(os.path.join(bare, C.TASK_DIR)), "[R9] a start that crashes leaves no empty task folder")
+
+
+def test_answer_names_the_approvals_still_waiting():
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"]), item("B", ["mod.py"])])
+    run("block", "1", "--question", "Which?", "--task", t)
+    run("block", "2", "--approval", "delete a file", "--task", t)
+    out, _ = run("next", "--task", t)
+    check(out["action"] == "stop" and out["approvals"] == ["2"], "[R11] a question and an approval stop the task")
+    out, _ = run("answer", "--id", "Q1", "--text", "this", "--task", t)
+    check("resume --approve <ids> --deny <ids>" in out["next"] and "as the user said" in out["next"],
+          "[R11] with an approval still waiting, answer's next is the resume that settles it")
+    t, _ = start(root, [item("C", ["other.py"])])
+    run("block", "1", "--question", "And?", "--task", t)
+    run("next", "--task", t)
+    out, _ = run("answer", "--id", "Q1", "--text", "that", "--task", t)
+    check(out["next"] == C.cmd_line(ad.state.Task(t), "resume"), "[R11] with none waiting it is the plain resume")
+
+
+def test_plan_says_which_edits_it_did_not_apply():
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"]), item("B", ["mod.py"])])
+    append(os.path.join(root, "mod.py"), "#\n")
+    run("done", "1", "--task", t)  # item 1 is done, item 2 is running
+    out, _ = run("plan", "--task", t)
+    check("ignored_edits" not in out and out["next"] == C.cmd_line(ad.state.Task(t), "next"),
+          "[R12] a plan that edits nothing says nothing about edits")
+
+    def both(p):
+        p["items"][0]["goal"] = "a new goal for the done item"
+        p["items"][1]["goal"] = "a new goal for the running item"
+    edit_plan(t, both)
+    out, _ = run("plan", "--task", t)
+    check(out["ignored_edits"] == ["1", "2"] and out["kept"] == ["1", "2"] and out["edited"] == []
+          and "annotate" in out["next"] and "new item" in out["next"] and "a new goal" not in read(
+              os.path.join(t, "plan.json")),
+          "[R12] an edit to a done or running item is named as not applied, with what to do instead")
+
+
+def test_a_lock_that_only_looks_alive():
+    if os.name == "nt":
+        return
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"])])
+    lock = os.path.join(t, ".lock")
+    write(lock, "not a process id")
+    with mock.patch.object(ad.state, "LOCK_WAIT_S", 0.2):
+        err = refused("task_locked", 3, "decide", "--question", "q", "--chosen", "c", "--because", "b", "--task", t)
+    check("ask the user, then delete that file" in err and os.path.exists(lock),
+          "[R13] a lock that cannot be told dead says how to clear it, on every system")
+    write(lock, str(os.getpid()))  # a live command took the lock between the look and the takeover
+    check(ad.state.Task(t)._remove_dead_lock() is True and read(lock) == str(os.getpid())
+          and not os.path.exists(lock + ".takeover"),
+          "[L5] the takeover looks at the lock again, and leaves one that a live command now holds")
+    os.remove(lock)
+
+
+def test_ignored_planned_files_are_refused():
+    root = repo({"mod.py": "A = 1\n", ".gitignore": "build/\n*.log\n", "kept.log": "k\n"})
+    sh(root, "git", "add", "-f", "kept.log")
+    sh(root, "git", "commit", "-qm", "a tracked file that an ignore pattern matches")
+    os.makedirs(os.path.join(root, "build"))
+    write(os.path.join(root, "build", "out.txt"), "o\n")
+    for files in (["build/out.txt"], ["build/"], ["new.log"]):
+        err = refused("ignored_files", 1, "start", "--root", root, "--statement", "s", "--plan",
+                      plan_file([item("A", files, check_cmd=["true"])], check_cmd=()), "--new-files")
+        check(files[0] in err and "rerun start" in err and not os.path.exists(os.path.join(root, C.TASK_DIR)),
+              f"[R14] start refuses a planned file that git ignores, before it creates anything: {files[0]}")
+    t, _ = start(root, [item("A", ["mod.py"], check_cmd=["true"]), item("K", ["kept.log"], check_cmd=["true"])],
+                 check_cmd=())
+    check(len(state(t)["items"]) == 2, "[R14] a tracked file is never ignored, whatever .gitignore says")
+    edit_plan(t, lambda p: p["items"].append(item("B", ["build/out.txt"], check_cmd=["true"])))
+    err = refused("ignored_files", 1, "plan", "--task", t)
+    check("build/out.txt" in err and "rerun plan" in err and len(state(t)["items"]) == 2,
+          "[R14] plan refuses it too, and changes nothing")
+
+
+def test_plan_ignores_a_done_items_dirty_file():
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"])])
+    append(os.path.join(root, "mod.py"), "#\n")
+    run("done", "1", "--task", t)
+    append(os.path.join(root, "mod.py"), "# the user's edit, after the item was committed\n")
+    edit_plan(t, lambda p: p["items"].append(item("C", ["README.md"], check_cmd=["true"])))
+    out, _ = run("plan", "--task", t)
+    check(out["added"] == ["2"] and out["kept"] == ["1"],
+          "[H2] a done item in the plan file does not make its file count as given to an item again")
+    edit_plan(t, lambda p: p["items"].append(item("D", ["mod.py"], check_cmd=["true"])))
+    refused("dirty_files", 1, "plan", "--task", t)
+
+
+def test_a_long_list_of_names_is_cut_in_the_error():
+    files = {f"f{n:02}.txt": "x\n" for n in range(C.NAMES_SHOWN + 5)}
+    root = repo(files)
+    for name in files:
+        append(os.path.join(root, name), "user wip\n")
+    err = refused("dirty_files", 1, "start", "--root", root, "--statement", "s", "--plan",
+                  plan_file([item("A", sorted(files), check_cmd=["true"])], check_cmd=()))
+    check("f19.txt and 5 more" in err and "f20.txt" not in err, "[M8] start's dirty_files error cuts a long list")
 
 
 def test_docs_name_real_commands():

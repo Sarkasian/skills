@@ -9,6 +9,8 @@ import time
 from ad.common import ENV_MAX_PARALLEL, Fail, MAX_PARALLEL, MAX_PARALLEL_LIMIT, _now, PROJECT_CONFIG, SCHEMA, VERSION
 
 LOCK_WAIT_S = 60  # how long a command waits for another command's lock before it gives up
+# A file name that is not UTF-8 reaches the state as git gave it (see vcs.git); it is written back as its bytes.
+UTF8 = {"encoding": "utf-8", "errors": "surrogateescape"}
 
 
 def usable_max_parallel(v):
@@ -70,7 +72,7 @@ class Task:
 
     def load(self):
         try:
-            with open(self.state_path, encoding="utf-8") as f:
+            with open(self.state_path, **UTF8) as f:
                 st = json.load(f)
         except (OSError, ValueError) as e:
             raise Fail("state_unreadable", f"cannot read {self.state_path}: {e}", 3, "needs_user",
@@ -85,7 +87,7 @@ class Task:
         st["updated_at"] = _now()
         tmp = os.path.join(self.dir, f".state.{secrets.token_hex(4)}.tmp")
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
+            with open(tmp, "w", **UTF8) as f:
                 json.dump(st, f, ensure_ascii=False, indent=1)
             os.replace(tmp, self.state_path)
         except OSError as e:
@@ -105,7 +107,7 @@ class Task:
                     if raw and not raw.endswith(b"\n"):
                         f.seek(raw.rfind(b"\n") + 1)
                         f.truncate()
-            with open(self.record_path, "a", encoding="utf-8") as f:
+            with open(self.record_path, "a", **UTF8) as f:
                 f.write(line + "\n")
         except OSError as e:
             raise Fail("record_write_failed", f"cannot append to {self.record_path}: {e}; state.json holds the "
@@ -115,7 +117,7 @@ class Task:
         if not os.path.exists(self.record_path):
             return []
         out = []
-        with open(self.record_path, encoding="utf-8") as f:
+        with open(self.record_path, **UTF8) as f:
             for line in f:
                 with _quiet(ValueError):
                     out.append(json.loads(line))
@@ -137,7 +139,9 @@ class Task:
                     raise Fail("task_locked", f"{self.lock_path} is held by a live process for over {LOCK_WAIT_S}s",
                                3, "needs_user", "wait for the other command to end, then rerun this one"
                                + ("; on Windows a lock is never taken over, so if no command is running, "
-                                  "delete that file" if os.name == "nt" else ""))
+                                  "delete that file" if os.name == "nt" else
+                                  "; if no other command is running (another process now has the lock's "
+                                  "process id, or the file is damaged), ask the user, then delete that file"))
                 time.sleep(0.1)
 
     def _remove_dead_lock(self):

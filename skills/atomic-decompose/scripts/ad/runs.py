@@ -116,6 +116,8 @@ def start_runs(task, st, groups):
         elif top:  # a file of this run's items that is dirty already holds an earlier executor's partial work
             files = [f for i in g for f in by[i]["files"]]
             run["snapshot"] = {p: h for p, h in dirty_files(top, st["root"]).items() if not covered(p, files)}
+        if top:  # what is already changed in the repository outside the root; a new worktree has nothing changed
+            run["snapshot_out"] = {} if run["worktree"] else dirty_files(top, st["root"], outside=True)
         for i in g:
             by[i].update(status="running", run=rid)
             task.event("item_started", i, {"run": rid, "try": by[i]["tries"] + 1})
@@ -168,9 +170,32 @@ def write_brief(task, st, run):
     path = os.path.join(task.dir, "briefs", f"{run['id']}.md")
     for d in ("briefs", "results"):
         os.makedirs(os.path.join(task.dir, d), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
         f.write("\n".join(lines) + "\n")
     return path
+
+
+def outside_root(run, top_of_run):
+    """{path: hash} of what changed since the run began in its repository but outside the root. No item can own
+    such a file. The paths are relative to the run's folder, so each starts with `../`. Empty when the root is
+    the top of the repository, and for a run that began before this was recorded."""
+    if "snapshot_out" not in run:
+        return {}
+    links = {os.path.relpath(os.path.join(top_of_run, p), run["dir"]).replace("\\", "/")
+             for p in run.get("links") or []}
+    return {p: h for p, h in dirty_files(top_of_run, run["dir"], outside=True).items()
+            if run["snapshot_out"].get(p) != h and p not in links}
+
+
+def left_behind(st):
+    """The worktrees and branches a task that stops for good leaves in the repository, for the user to remove."""
+    out = []
+    for r in st["runs"]:
+        there = bool(r.get("worktree")) and os.path.isdir(r["worktree"])
+        if r.get("branch") and (there or r.get("branch_kept")):
+            out.append({"run": r["id"], "items": r["items"], "worktree": r["worktree"] if there else None,
+                        "branch": r["branch"]})
+    return out
 
 
 def result_path(task, it):
@@ -265,8 +290,9 @@ def land_run(task, st, run):
             if kept:
                 it["notes"].append(f"Its partial work from run {run['id']} {kept}")
     left = dirty_files(git_top(run["dir"]), run["dir"])
+    left.update(outside_root(run, git_top(run["dir"])))  # and what changed in the worktree outside the root
     for p, h in left.items():                       # new files outside every item's files:
-        dest = os.path.join(st["root"], p)          # finish lists them in untracked_left
+        dest = os.path.normpath(os.path.join(st["root"], p))  # finish lists them in untracked_left
         if untracked(h) and not os.path.lexists(dest):
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             shutil.copy2(os.path.join(run["dir"], p), dest, follow_symlinks=False)
@@ -276,10 +302,12 @@ def land_run(task, st, run):
         with _quiet(Fail, OSError, ValueError):  # a patch that cannot be saved must not stop the landing
             save_patch(run["dir"], outside, patch)
             run["outside"] = patch
+    # lint: no-dry-run: the run's own worktree; its commits are landed or stay on its branch, the rest is saved above
     git(top, "worktree", "remove", "--force", run["worktree"], check=False)
     if clash:
         run["branch_kept"] = True
     else:
+        # lint: no-dry-run: the run's own branch, after every commit on it was cherry-picked onto HEAD
         git(top, "branch", "-D", run["branch"], check=False)
     return None
 
@@ -341,9 +369,11 @@ def start_review(task, st):
               "conflicts between items, and anything a goal asked for that is not there.",
               f"Write one line per finding to {path}: `<high|medium|low> <file>:<line> <problem> -> <fix>`, "
               "or `no findings`. Reply with the number of findings."]
+    if os.path.isfile(path):  # the review from before a rework: kept, and out of the way of the new one
+        os.replace(path, os.path.join(task.dir, f"review-before-{rid}.md"))
     brief = os.path.join(task.dir, "briefs", f"{rid}-review.md")
     os.makedirs(os.path.dirname(brief), exist_ok=True)
-    with open(brief, "w", encoding="utf-8") as f:
+    with open(brief, "w", encoding="utf-8", errors="surrogateescape") as f:
         f.write("\n".join(lines) + "\n")
     st["runs"].append({"id": rid, "items": [], "status": "active", "kind": "review", "brief": brief,
                        "worktree": None, "started_at": _now()})
