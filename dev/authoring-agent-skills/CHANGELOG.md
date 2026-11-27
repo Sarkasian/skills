@@ -3,7 +3,7 @@
 ## 1.3.0 (2026-11-27)
 
 New guidance for a file that reaches its size limit. The evals have not been re-run for it.
-- `references/authoring.md`, "When a file reaches its size limit": move situational text from SKILL.md to `references/` with a load condition; split a long script into modules behind the same entry script; never delete instructions, argument help, tests or doc sentences to pass a size check; ask before a limit moves.
+- `references/authoring.md`, "When a file reaches its size limit": move situational text from SKILL.md to `references/` with a load condition; do not cap a script's lines, and split a long one into modules behind the same entry script; never delete instructions, argument help, tests or doc sentences to pass a size check; ask before a limit moves.
 - Step 5 has one hard rule that says the same.
 - `lint_skill.py` checks scripts in subfolders of `scripts/` too (side effects without `--dry-run`, interactive prompts), so splitting a script into modules does not hide it from the lint. Only a script directly in `scripts/` needs its own `--help`.
 - Signal: an agent editing `atomic-decompose` met the SKILL.md and script caps by cutting the "never commit or revert" and "never approve for the user" rules, argument help and blank lines.

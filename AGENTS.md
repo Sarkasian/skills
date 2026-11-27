@@ -39,10 +39,10 @@ Direct pushes bypass the PR review process and can land CI failures on `main` if
 
 ## Size limits
 
-`dev/atomic-decompose/selftest.py` caps the size of that skill's `SKILL.md` and of its script. A cap keeps the skill cheap to load. It is not a number to squeeze under.
+`dev/atomic-decompose/selftest.py` caps the size of that skill's `SKILL.md`, because the agent loads that file on every run. The cap is not a number to squeeze under. Scripts have no line cap: the agent runs them and does not load them.
 
 - `SKILL.md` at its cap: move text that only one situation needs to `references/`, with a line that says when to read it.
-- The script at its cap: stop and ask. Raising a cap needs the user's agreement and the reason in the selftest comment.
+- If that is not enough: stop and ask. Raising the cap needs the user's agreement and the reason in the selftest comment.
 - Never delete instructions, argument help, tests, sentences in the docs or blank lines to fit, and never edit a check or a document so that a check passes.
 
 `skills/authoring-agent-skills/references/authoring.md` has the general rule ("When a file reaches its size limit").
