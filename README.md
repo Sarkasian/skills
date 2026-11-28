@@ -53,7 +53,7 @@ The skill holds principles, not host-specific facts such as frontmatter keys, fo
 
 ## deep-research-run
 
-The skill has no scripts. It needs a page fetch tool, and a web search tool for anything beyond known URLs. A deep-research tool is optional; with the [local-deep-research](https://github.com/LearningCircuit/local-deep-research) MCP server, `references/local-deep-research.md` gives its tools and `references/local-model-setup.md` describes one example setup on a local model. The skill sends search queries and research prompts to whatever search service and model the host or engine is configured with, and it never changes that configuration.
+The skill has no scripts. It needs a page fetch tool, and a web search tool for anything beyond known URLs. A deep-research tool is optional; with the [local-deep-research](https://github.com/LearningCircuit/local-deep-research) MCP server, `references/local-deep-research.md` gives its tools and `references/local-model-setup.md` describes one example setup on a local model. `references/pass-limits.md` has the rules for a time limit on the whole item and for a pass that fails. The skill sends search queries and research prompts to whatever search service and model the host or engine is configured with, and it never changes that configuration.
 
 ## Develop
 

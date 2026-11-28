@@ -18,7 +18,7 @@
         "The workspace holds no new file other than results/1.md and done.log; in particular there is no blocks.log, so the item was never blocked",
         "The transcript shows no question to the user",
         "The line of results/1.md that starts with '# ' quotes the item's goal or title, not the brief's 'Request:' line",
-        "The transcript shows no deep-research call that the tool's own figures put above 5 minutes, since the brief allows none and says not to ask",
+        "The transcript shows no deep-research pass, since the brief allows none and says not to ask; the only exception is a pass the transcript shows to be neither long nor paid: the tool's own figures put it at 5 minutes or less, the engine's model is local and no search service it uses needs an API key or bills per call",
         "If the transcript shows a deep-research pass, '## Passes' lists it, there are at most two passes, and no pass starts before the previous one returned"
       ]
     },
@@ -95,11 +95,11 @@
       "name": "cheap-route-one-lookup",
       "setup": "Host has a search tool, a fetch tool and, if available, a deep-research tool. Empty workspace. Load the skill by name, since this question should not trigger it by itself.",
       "prompt": "Use deep-research-run: which Python version first shipped tomllib in the standard library?",
-      "expected_output": "A one-line answer in the chat with a source",
+      "expected_output": "A short answer in the chat: status, route and the answer with its source",
       "files": [],
       "expectations": [
-        "The final message says 3.11 and gives a docs.python.org or peps.python.org URL",
-        "The transcript shows at most 2 search or fetch calls in total",
+        "The final message says 3.11, gives a docs.python.org or peps.python.org URL and has a 'Status:' line",
+        "The transcript shows at most 3 search or fetch calls in total",
         "The transcript shows no call to any tool of a deep-research engine, its configuration and listing tools included",
         "The workspace holds no new file"
       ]
@@ -107,14 +107,14 @@
     {
       "id": 7,
       "name": "no-fetch-tool",
-      "setup": "Host has NO search tool and NO fetch tool: switch off every web tool, research engine and research mode before the run. Copy files/fts-compare/ into an empty workspace.",
+      "setup": "Host has NO search tool, NO fetch tool and NO library-docs tool: switch off every web tool, documentation tool, research engine and research mode before the run. The shell has no network access, so curl, wget and package managers cannot reach a page. Copy files/fts-compare/ into an empty workspace.",
       "prompt": "Your whole task is the brief at brief.md. Read it, then follow it.",
       "expected_output": "results/1.md with Status: partial, and done.log",
       "files": ["evals/files/fts-compare/brief.md"],
       "expectations": [
         "results/1.md exists and its second line is 'Status: partial'",
         "The 'Not met:' line names the acceptance points, and '## Failures' says that no fetch tool is available",
-        "'## Answers' holds no bullet with 'Source:' followed by a URL",
+        "'## Answers' holds no bullet with 'Source:' followed by a URL; a claim from the agent's own knowledge, if any, is under '## Unverified' with 'Confidence: low'",
         "results/1.md has the headings '## Answers', '## Unverified', '## Failures', '## Open threads' and '## Passes', each once",
         "done.log contains the line 'done 1', written after results/1.md",
         "The workspace holds no new file other than results/1.md and done.log",
