@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,16 @@ def make(root: Path, name: str, desc: str = GOOD, body: str = "# T\n", files: di
         (d / rel).parent.mkdir(parents=True, exist_ok=True)
         (d / rel).write_text(text, encoding="utf-8")
     return d
+
+
+def err(script: str, *args: str) -> tuple[int, str]:
+    """Exit code and stderr of a run that is expected to be refused."""
+    p = subprocess.run([sys.executable, str(HERE / script), *args], capture_output=True, text=True, timeout=120)
+    assert "Traceback" not in p.stderr and not p.stdout.strip(), f"{script} {args}: {p.stdout} {p.stderr}"
+    return p.returncode, p.stderr
+
+
+SLOW_LIMIT = 40  # seconds for the lint of all the adversarial inputs together; it takes about 3 on a laptop
 
 
 def lint(*args: str) -> tuple[int, str, str]:
@@ -110,6 +121,50 @@ with tempfile.TemporaryDirectory() as tmp:
     (t / "afile").write_text("x")
     assert run("scaffold.py", "--name", "sub-skill", "--dest", str(t / "afile"), "--description", "x")[0] == 2, "an unwritable target is exit 2"
     assert any("scripts/validate.py" in e for e in out["errors"]), "a missing script named inside a command must fail lint"
+    # a target that cannot be written is found before the first write, and --dry-run reports the same refusal
+    assert err("scaffold.py", "--name", "sub-skill", "--dest", str(t / "afile"), "--description", "x", "--dry-run")[0] == 2, "--dry-run under a file"
+    for dest in ("d" * 300, str(t / "afile" / "deeper")):  # a name too long for the file system; a file in the way
+        for extra in ((), ("--dry-run",)):
+            assert err("scaffold.py", "--name", "far-skill", "--dest", dest, "--description", "x", *extra)[0] == 2, f"{dest[-20:]} {extra}"
+    assert run("scaffold.py", "--name", "half-skill", "--dest", tmp, "--description", "first")[0] == 0
+    half = t / "half-skill"
+    before = (half / "SKILL.md").read_text()
+    shutil.rmtree(half / "evals")
+    (half / "evals").write_text("a file where a folder has to be\n")
+    refused = err("scaffold.py", "--name", "half-skill", "--dest", tmp, "--description", "second", "--force")
+    assert refused[0] == 2 and "evals is not a folder" in refused[1], refused
+    assert (half / "SKILL.md").read_text() == before, "a run that cannot write every file must write none"
+    assert err("scaffold.py", "--name", "half-skill", "--dest", tmp, "--description", "second", "--force", "--dry-run") == refused, "--dry-run: same refusal"
+    assert err("scaffold.py", "--name", "half-skill", "--dest", tmp, "--description", "second")[0] == 2, "exit 2 comes before 'files exist'"
+    (half / "evals").unlink()
+    (half / "scripts").rmdir()
+    (half / "scripts").write_text("a file where an empty folder is to be made\n")
+    refused = err("scaffold.py", "--name", "half-skill", "--dest", tmp, "--description", "second", "--force")
+    assert refused[0] == 2 and "scripts is a file" in refused[1] and (half / "SKILL.md").read_text() == before and not (half / "evals").exists(), refused
+    (t / "dir-skill" / "SKILL.md").mkdir(parents=True)
+    refused = err("scaffold.py", "--name", "dir-skill", "--dest", tmp, "--description", "x", "--force")
+    assert refused[0] == 2 and "SKILL.md is a folder" in refused[1] and not (t / "dir-skill" / "evals").exists(), refused
+    if os.geteuid():  # root may write anywhere, so these three cannot be shown as root
+        (t / "locked").mkdir()
+        (t / "locked" / "inner").mkdir()
+        (t / "readonly").mkdir()
+        assert run("scaffold.py", "--name", "ro-skill", "--dest", tmp, "--description", "first")[0] == 0
+        ro = t / "ro-skill" / "SKILL.md"
+        try:
+            (t / "locked").chmod(0)
+            (t / "readonly").chmod(0o555)
+            ro.chmod(0o444)
+            for dest in (t / "locked", t / "locked" / "inner" / "new", t / "readonly"):
+                for extra in ((), ("--dry-run",)):
+                    assert err("scaffold.py", "--name", "no-skill", "--dest", str(dest), "--description", "x", *extra)[0] == 2, f"{dest} {extra}"
+            refused = err("scaffold.py", "--name", "ro-skill", "--dest", tmp, "--description", "second", "--force")
+            assert refused[0] == 2 and "no permission to overwrite" in refused[1], refused
+            assert err("scaffold.py", "--name", "ro-skill", "--dest", tmp, "--description", "second", "--force", "--dry-run") == refused
+            assert json.loads((t / "ro-skill" / "evals" / "evals.json").read_text()) and "first" in ro.read_text(), "nothing was overwritten"
+        finally:
+            (t / "locked").chmod(0o755)
+            (t / "readonly").chmod(0o755)
+        assert not list((t / "readonly").iterdir()) and not list((t / "locked" / "inner").iterdir())
     assert (sk / "assets" / "learning-entry.md").is_file(), "the template the learnings README names must be scaffolded"
 
     # the eval 3 fixture carries planted defects; the linter has to find each one
@@ -177,7 +232,12 @@ with tempfile.TemporaryDirectory() as tmp:
     runs.write_text('{"query": "a", "should_trigger": true, "triggered": true}\r\n' * 2 + '{"query": "b", "should_trigger": false, "triggered": false}\r\n')
     code, out = run("score_trigger_evals.py", str(runs))
     assert code == 0 and out["train"]["queries"] + out["test"]["queries"] == 2, "CRLF line ends are line ends"
-    # nested too deeply: an older Python raises RecursionError, a newer one parses it to a list, which is no run. Exit 2 on both.
+    for sep in ("\v", "\f", "\x1c", "\x1d", "\x1e"):  # the other characters str.splitlines() ends a line at
+        runs.write_text(sep.join('{"query": "%s", "should_trigger": true, "triggered": true}' % q for q in "ab") + "\n")
+        code, out = run("score_trigger_evals.py", str(runs))
+        assert code == 0 and out["train"]["queries"] + out["test"]["queries"] == 2, f"{sep!r} ends a line: {code} {out}"
+    # nested too deeply: json raises RecursionError on the Pythons this was run on (3.12 and 3.13); a Python that parses it
+    # gets a list, which is no run. Exit 2 either way.
     for bad_runs in ("{oops\n", "[1, 2]\n", "", "[" * 100000 + "]" * 100000 + "\n", '{"query": "a", "should_trigger": true}\n',
                      '{"should_trigger": true, "triggered": true}\n', '{"query": "a", "triggered": true}\n',
                      '{"query": 1, "should_trigger": true, "triggered": true}\n',
@@ -208,6 +268,7 @@ with tempfile.TemporaryDirectory() as tmp:
         "scripts/pw.py": 'import argparse, getpass\npw = getpass.getp' 'ass("token: ")\n',
         "scripts/run.ts": "console.log('usage')\nfunction inp" "ut(args: string[]) { return args }\n",
         "scripts/test_clean.py": "import shutil, tempfile\nshutil.rmtree(tempfile.mkdtemp())\n",
+        "scripts/bom.py": '\ufeff"""Never runs rm -rf; usage: bom.py."""\nx = 1\n',  # a byte order mark does not turn the docstring into code
     }
     not_mine = "import shutil\nx = inp" "ut('y/n? ')\nshutil.rmtree('build')\n"
     for folder in ("node_modules/dep", ".venv/lib", "vendor", "tests/fixtures", "__pycache__"):
@@ -220,7 +281,7 @@ with tempfile.TemporaryDirectory() as tmp:
         assert f"scripts/{name}: changes something outside this machine" in w, f"{name}: {w}"
     for name in ("argv_rm.py", "sweep.sh", "move.py", "strwaive.py", "short.py", "mention.py"):
         assert f"scripts/{name}: changes things" in w, f"{name}: {w}"
-    for name in ("trail.py", "real.py", "doc.py", "run.ts", "test_clean.py", "mod.py"):
+    for name in ("trail.py", "real.py", "doc.py", "run.ts", "test_clean.py", "mod.py", "bom.py"):
         assert f"{name}:" not in w + e, f"{name} must be clean: {w} {e}"
     assert "scripts/ask.sh: interactive" in e and "scripts/pw.py: interactive" in e and e.count("interactive") == 2, e
     assert "scripts/link.py: a symlink" in w and "scripts/folder.py: a symlink" in w, "odd files are named, not read: " + w
@@ -266,11 +327,16 @@ with tempfile.TemporaryDirectory() as tmp:
     e = lint(str(d))[1]
     assert 'evals.json: must be a JSON object' in e and "trigger_evals.json: must be a JSON array" in e, e
     (d / "evals" / "evals.json").write_text("[" * 100000 + "]" * 100000)
-    code, e, w = lint(str(d))  # newer Pythons parse this depth, older ones raise RecursionError: an error either way
+    code, e, w = lint(str(d))  # json raises RecursionError at this depth; a Python that parses it gets a list: an error either way
     assert code == 1 and "evals/evals.json: " in e, "deeply nested JSON is a lint error, not a crash: " + e
     assert run("lint_skill.py", str(d), "--evals-dir", str(t / "nowhere")) == (2, {}), "a missing --evals-dir is bad input"
     (d / "SKILL.md").write_bytes(b"---\nname: evalfiles\ndescription: x\n---\n\xff\xfe\n")
     assert run("lint_skill.py", str(d)) == (2, {}), "a file that cannot be read is exit 2, not a traceback with exit 1"
+    # a path that is no folder is bad input, also a file and a name too long for the file system
+    for args in ((str(d / "SKILL.md"),), (str(c / "calls"), "--evals-dir", str(d / "SKILL.md")), ("s" * 300,),
+                 (str(c / "calls"), "--evals-dir", "s" * 300)):
+        refused = err("lint_skill.py", *args)
+        assert refused[0] == 2 and refused[1].startswith("not a directory: "), f"{args}: {refused}"
 
     # ---- table: one script per documented form, so each form has its own assertion. A row is (suffix, source, expected),
     # where expected holds "outside", "things" and/or "interactive", or is "" for a script the lint must leave alone.
@@ -381,6 +447,114 @@ with tempfile.TemporaryDirectory() as tmp:
             ("py", "data = sys.stdin.read()\n", ""), ("js", 'function input(a) { return a }\nconst x = input("y")\n', "")):
         rows.append((suffix, src, expected))
 
+    # ---- more rows. An expected value may also hold "unread": the lint says the .py file was not read as Python.
+    # a git command given as arguments: read from the tokens, so the layout does not matter
+    for call in ('git(str(top), "push")', 'git(\n    top,\n    "push",\n)', 'run(["git",\n     "push"])', 'run(("git", "push"))', 'git(top,"push")',
+                 'git(top, "-c", "user.name=push", "push")', 'git("--no-pager", "push")', 'GIT("push")', 'check_git(top, "push")', 'gitCmd("push")',
+                 'subprocess.run(["git", "--git-dir", d, "push"])', 'run(["sudo", "git", "push"])'):
+        rows.append(("py", call + "\n", "outside"))
+    for call in ('git(top,"merge")', 'git(top,"clean")', 'git(top,"reset","--hard")', 'run(["git","reset","--hard"])', 'git(\n    top,\n    "merge",\n    b,\n)',
+                 'git(\n    top,\n    "checkout",\n    sha,\n    "--",\n    path,\n)', 'run("git worktree remove x")', 'run("git branch -D old")',
+                 'run("git checkout -- file.txt")', 'run("git checkout HEAD~1 -- file.txt")', 'run(["git", "worktree", "remove", p])',
+                 'run(["git", "branch", "-D", b])', 'run(["git", "checkout", "--", p])', 'f"{shutil.rmtree(d)}"', 'f"""\n{os.remove(t)}\n"""'):
+        rows.append(("py", call + "\n", "things"))
+    for line in ("git worktree remove x", "git branch -D old", "git checkout -- file.txt", "git checkout HEAD~1 -- file.txt"):
+        rows.append(("sh", line + "\n", "things"))
+    rows.append(("js", 'git(["push"])\n', "outside"))
+    rows.append(("js", 'execFileSync("git", ["-C", top, "merge", b])\n', "things"))
+    rows.append(("js", 'execFileSync("git", ["push"])\n', "outside"))
+    rows.append(("js", 'spawn("git", "-C", top, "push")\n', "outside"))
+    rows.append(("js", 'runGit(top, "reset", "--hard")\n', "things"))
+    rows.append(("js", 'git(top, "branch", "-D", b)\n', "things"))
+    # look-alikes
+    for call in ('github_events(repo, "push")', 'gitlab_trigger("push")', 'git_branch_exists("push")', 'git_log(top, "--grep", "push")',
+                 'git(top, "rev-parse", "push")', 'x = ("git", "status"); y = ("x", "push")', 'OPS = ["worktree", "remove", "branch", "-D"]',
+                 'KIND = ["checkout", "review", "--"]', 'git(top, "checkout", name)  # then "--" later', 'git(top, "log"); other("push")',
+                 'git(top, "branch", "-d", b)', 'git(top, "log", "--grep", "merge")', 'git(top, "-C", "push", "status")', 'legit("push")',
+                 'git(top, "reset", "--soft")', 'git(top, "worktree", "add", "remove")', 'git(top, "show", f"{sha}:push")', 'run(["git", "status"], ["push"])',
+                 'x = "git"\ny = ["push"]', 'run("git checkout main -b x")', 'run("git branch -d old")', 'run("git branch --list -Dx")',
+                 'run("git checkout main") or print(" -- ")', 'run(["git", "--git-dir", "push", "status"])', 'git("--work-tree", "push", "status")',
+                 'git("--namespace", "push", "log")', 'git(top, opts["push"], "status")', 'git(top, mode or "push", "status")', 'x = git["push"]', 'git(top, "re" + "set", "--hard")'):
+        rows.append(("py", call + "\n", ""))
+    for line in ('legit("push")', 'digit(top, "merge")', 'git(top, "branch", "-d", b)', 'on("git", () => emit("push"))', 'const KIND = ["checkout", "review", "--"]', 'gitlab("push")', 'git_log(top, "x", "push")', 'git(top, "log", "push")'):
+        rows.append(("js", line + "\n", ""))
+    for line in ("git branch -d old", "git checkout main", "git checkout -b fix--it", "git worktree list", "echo git checkout; echo --"):
+        rows.append(("sh", line + "\n", ""))
+    # the flag: more ways to define it
+    for suffix, flag in (
+            ("py", 'import typer\n\n\ndef main(dry_run: bool = typer.Option(False, help="preview")):\n    pass'),
+            ("py", 'import typer\n\n\ndef main(dry_run: bool = False):\n    pass'),
+            ("py", 'dry = arg in (\n    "-n",\n    "--dry-run",\n)'), ("py", 'dry = arg not in ("--dry-run",)'), ("py", 'dry = "--dry-run" not in args'),
+            ("py", 'dry = "--dry-run" == arg'), ("py", 'dry = arg != "--dry-run"'), ("py", 'dry = arg.startswith("--dry-run")'),
+            ("py", 'dry = args.index("--dry-run")'), ("py", 'args.remove("--dry-run")'), ("py", 'ap.add_argument("-n", "--dry-run", "--no-act", action="store_true")'),
+            ("py", '@click.option("--dry-run/--no-dry-run", default=False)\ndef main(dry_run):\n    pass'), ("py", 'parser.add_option("-n", "--dry-run")'), ("py", 'opt = Option("-n", "--dry-run")'),
+            ("py", 'match arg:\n    case "-n" | "--dry-run":\n        dry = True'), ("py", 'match arg:\n    case "--dry-run" | "-n":\n        dry = True'),
+            ("sh", 'case "$1" in\n  --dry-run | -n) dry=1 ;;\nesac'), ("sh", 'case "$1" in\n  -n | --dry-run ) dry=1 ;;\nesac'),
+            ("sh", 'case "$1" in\n  --dry-run=*) dry=1 ;;\nesac'), ("sh", 'case "$1" in\n  -h) usage ;; --dry-run) dry=1 ;;\nesac'),
+            ("sh", 'case "$1" in (--dry-run) dry=1 ;; esac'), ("sh", 'case "$1" in\n  "--dry-run") dry=1 ;;\nesac'),
+            ("sh", '[ "$1" = --dry-run ] && dry=1'), ("sh", 'if [ --dry-run = "$1" ]; then dry=1; fi'), ("sh", 'if test "$1" = "--dry-run"; then dry=1; fi'),
+            ("sh", '[[ "$1" != "--dry-run" ]] || dry=1'),
+            ("js", "yargs.option('dry-run', { type: 'boolean' })"), ("js", 'const dry = argv.indexOf("--dry-run") >= 0'), ("js", "const dry = flags.has('--dry-run')"),
+            ("js", 'switch (a) {\n  case "--dry-run":\n    dry = true\n}'), ("js", 'program.option("--dry-run", "preview")'), ("js", 'const dry = "--dry-run" === process.argv[2]'), ("js", "const dry = a == `--dry-run`"),
+            ("js", 'program\n  .option(\n    "-n, --dry-run",\n    "preview")')):
+        rows.append((suffix, flag + "\n" + wipe[suffix], ""))
+    # ... and more places where it is only a mention
+    for suffix, mention in (
+            ("py", 'ap.add_argument("--force", action="store_true",\n                help="there is no --dry-run yet")'), ("py", 'ap.add_argument("--force", help="no --dry-run yet")'),
+            ("py", 'ap.add_argument("--force", "no --dry-run yet")'), ("py", 'force: bool = typer.Option(False, help="--dry-run")'),
+            ("py", 'print("test with \'--dry-run\' in the list")'), ("py", 'x = typer.Option(False, "--yes", help="no --dry-run yet")'),
+            ("py", 'print("written in (see --dry-run later)")'), ("py", 'for cmd in (["terraform", "plan", "--dry-run"], ["ls"]):\n    pass'),
+            ("py", 'ok = cmd in (["terraform", "plan", "--dry-run"], ["ls"])'), ("sh", 'echo "we plan \'--dry-run\' in v2"'), ("py", 'print("x == \'--dry-run\'")'), ("py", 'for a in ("-n", "--dry-run"):\n    print(a)'),
+            ("py", 'names = [a for a in ("-n", "--dry-run")]'), ("py", 'USAGE = "usage: x [--dry-run] DIR"'), ("py", 'OPT = "--dry-run"'),
+            ("py", 'if len(sys.argv) < 2:\n    sys.exit("usage: x DIR (no --dry-run)")'), ("py", "x = 1  # (no --dry-run)"), ("py", 'x = f"--dry-run" in args'),
+            ("py", 'print("no --dry-run" in text)'), ("py", 'log("--dry-run")'), ("py", 'x = {"--dry-run": 1}'), ("py", 'dry_run: bool = False'),
+            ("py", 'case = "--dry-run"'), ("py", 'dry = "--dry-runs" in args'), ("py", 'n = count("--dry-run")'), ("py", 'import typer\nprint(dry_run)'), ("py", 'x = y if z else "--dry-run"'), 
+            ("sh", 'OPTS="--dry-run"'), ("sh", "tool --dry-run|cat"), ("sh", "x=$(tool --dry-run)"), ("sh", "tool --dry-run; other"), ("sh", 'echo "(no --dry-run)"'),
+            ("sh", 'x="a = --dry-run"'), ("sh", "tool --flag=--dry-run"),
+            ("js", 'const hit = text.includes("no --dry-run")'), ("js", 'run("tool", ["--dry-run"])'), ("js", 'const o = { "dry-run": true }'),
+            ("js", 'const opt = "--dry-run"')):
+        rows.append((suffix, mention + "\n" + wipe[suffix], "things"))
+    rows.append(("py", 'print("support for \'--dry-run\' in a later version")\ngit(top, "push")\n', "outside"))  # a mention does not hide a push
+    # strings and comments that hold quote marks do not hide the code after them, and do not turn a docstring into code
+    for src, expected in (
+            ('MARK = \'"""\'\ndef f():\n    """Doc.\n    """\n    shutil.rmtree(d)\ndef g():\n    """Doc."""\n', "things"),
+            ('x = 1  # strip the """ marks\ndef f():\n    """Doc.\n    """\n    subprocess.run("git push", shell=True)\ndef g():\n    """Doc."""\n', "outside"),
+            ('x = 1  # strip the """ marks\n"""Never runs git push or rm -rf."""\n', ""),
+            ("x = 1  # strip the \'\'\' marks\ndef f():\n    \'\'\'Never asks with input().\'\'\'\n", ""),
+            ("X = '\"\"\"'\n\n\ndef f():\n    \"\"\"doc\"\"\"\n    shutil.rmtree(d)\n", "things"),
+            ('X = "\'\'\'"\nos.remove(t)\nY = "\'\'\'"\n', "things"),
+            ('X = "a\\"\\"\\"b"\nsubprocess.run("git push", shell=True)\nY = """z"""\n', "outside"),
+            ('X = """a"""; os.remove(t); Y = """b"""\n', "things"),
+            ('def f():\n    x = 1; """not a docstring"""; os.remove(t)\n', "things"),
+            ('"""Doc."""; os.remove(t)\n', "things"),
+            ('def f():\n    """Doc, then code on the same line."""; x = input("go? ")\n', "interactive"),
+            ('"rm -rf out"\n"git push"\n', ""), ('"rm -rf out".split()\n', "things"), ('("rm -rf out")\n', "things"),
+            ('"""a""" """rm -rf b"""\n', ""), ('"""a""" f"""{os.remove(t)}"""\n', "things"),
+            ("class A:\n    'rm -rf out'\n    x = 1\n", ""), ('if x:\n    pass\n"""rm -rf out"""\n', ""),
+            ('x = 1 \\\n    + 2\n"""rm -rf out"""\n', ""),
+            ('x = "\u00e9\U0001f600"  # rm -rf \u00e9\U0001f600\n"""d\u00e9\U0001f600c: rm -rf"""\ny = "\u00fc"; z = 1  # \U0001f600 git push\n', ""),
+            ('x = "\u00e9\U0001f600"; os.remove(t)  # \u00e9\n', "things"),
+            ('if x:\n\tpass  # rm -rf\n\t"""rm -rf"""\n', "")):
+        rows.append(("py", src, expected))
+    # a .py file that does not tokenize, or has a very long line, is read line by line: named, and none of its code hidden
+    for src, expected in (
+            ('x = (\nshutil.rmtree(d)\n', "things unread"), ('"""never closed\nshutil.rmtree(d)\n', "things unread"),
+            ('def f():\n        x = 1\n    shutil.rmtree(d)\n', "things unread"),
+            ('x = "' + "a" * 5000 + '"\nshutil.rmtree(d)\n', "things unread"), ('x = "' + "a" * 4900 + '"\nshutil.rmtree(d)\n', "things"),
+            ('x = (\nap.add_argument("--dry-run")\nshutil.rmtree(d)\n', "unread"), ('x = (\n# lint: no-dry-run: removes its own temp\nshutil.rmtree(d)\n', "unread"),
+            ('x = (\ny = input("go? ")\n', "interactive unread"), ('x = (\ngit(\n  top,\n  "push")\n', "outside unread")):
+        rows.append(("py", src, expected))
+    # a gap in a pattern has a fixed maximum: at it the form is still found, one past it no longer
+    for src, expected in (("curl " + "-s " * 132 + " -X POST u\n", "outside"), ("curl " + "-s " * 133 + "-X POST u\n", "outside"),
+                          ("curl " + "-s " * 133 + " -X POST u\n", ""), ("git checkout " + "a" * 198 + " -- f\n", "things"),
+                          ("git checkout " + "a" * 200 + " -- f\n", ""), ('read -r -s -t 5 -n 1 -d x -u 3 -e -a b -i c -N 2 -p "Go? " a\n', "interactive"),
+                          ("read " + "-r " * 10 + '-p "Go? " a\n', "interactive"), ("read " + "-r " * 11 + '-p "Go? " a\n', ""), ('read -t 5 -p "Go? " a\n', "interactive"),
+                          ("read -r path\necho -p\n", ""), ("read -r path; echo -p\n", ""), ("read -t 5 path -p\n", "")):
+        rows.append(("sh", src, expected))
+    for src, expected in (('run(["git",' + " " * 80 + '"push"])\n', "outside"), ('run(["git",' + " " * 81 + '"push"])\n', ""),
+                          ("git(" + "a, " * 6 + '"push")\n', "outside"), ("git(" + "a, " * 7 + '"push")\n', "")):
+        rows.append(("js", src, expected))
+
     files = {f"scripts/c{i:03d}.{suffix}": first[suffix] + src for i, (suffix, src, _) in enumerate(rows)}
     # folders that hold code the author did not write, or files wrong on purpose; test files; files that are not scripts
     hot = first["py"] + "x = input('y/n? ')\nshutil.rmtree('build')\n"
@@ -399,7 +573,7 @@ with tempfile.TemporaryDirectory() as tmp:
     for i, (suffix, src, expected) in enumerate(rows):
         rel = f"scripts/c{i:03d}.{suffix}"
         got = " ".join(k for k, text in (("outside", f"{rel}: changes something outside this machine"), ("things", f"{rel}: changes things"),
-                                         ("interactive", f"{rel}: interactive prompt")) if text in w + e)
+                                         ("interactive", f"{rel}: interactive prompt"), ("unread", f"{rel}: not read as Python")) if text in w + e)
         assert got == expected, f"{rel} must give {expected or 'nothing'!r}, gave {got or 'nothing'!r}:\n{src}"
         assert f"{rel}: no --help" not in w, rel
     assert "skipped.py" not in w + e, "a folder in SKIP_DIRS or a dot folder is not read: " + w
@@ -505,6 +679,20 @@ with tempfile.TemporaryDirectory() as tmp:
     assert w.split(" | ") == ["path '../other.md' is not relative to the skill root",
                               "path '../../elsewhere/x.md' is not relative to the skill root (named in references/guide.md)",
                               "path '/etc/passwd' is not relative to the skill root (named in references/guide.md)"], w
+    # a path named again in the same file is reported again, as before, but looked up on disk once
+    d = make(c, "again", body="Read `references/a.md` if X. Run scripts/lost.py, then scripts/lost.py and [x](gone.md) and [x](gone.md).\n",
+             files={"references/a.md": "[b](b.md) " * 3000 + "scripts/lost.py " * 3000 + "[b](b.md)\n", "references/b.md": "x\n", "scripts/go.py": "import argparse\n"})
+    looked, real = [], LINT.on_disk
+    LINT.on_disk = lambda test: looked.append(1) or real(test)
+    try:
+        e, w, _ = quick(d)
+    finally:
+        LINT.on_disk = real
+    assert e.count("does not exist: scripts/lost.py (named in references/a.md)") == 3000 and e.count("does not exist: gone.md") == 2 \
+        and e.count("does not exist") == 3004, e[:300]
+    assert w.count("references/a.md names b.md, which SKILL.md never names") == 3001 and w.count(" | ") == 3001, w[:300]  # and one "references/b.md is never named"
+    # five paths (three in SKILL.md, two in a.md), and for scripts/lost.py, which is missing, its folder too
+    assert len(looked) == 7, f"each path is looked up once per file that names it, not once per mention: {len(looked)}"
     # a file name too long for the file system, or one with a NUL byte, does not exist: a lint error, not a crash, on every Python
     long_name = "a" * 300
     d = make(c, "long-names", files={"scripts/go.py": "import argparse\n"},
@@ -519,7 +707,8 @@ with tempfile.TemporaryDirectory() as tmp:
     e, w, _ = quick(d)
     assert e == "referenced file does not exist: scripts/within.py (named in references/small.md)" and w == "", f"{e} / {w}"
 
-    # ---- no input makes the lint slow: with a pattern that backtracks over these, the run would hit the timeout in run()
+    # ---- inputs written to be slow: the lint of all of them together has SLOW_LIMIT seconds. Each is here because a pattern
+    # (or, for gits.py and quotes.py, the tokenizer of Python 3.12 on one very long line) once took far longer on it.
     d = make(c, "slow", body="Read `references/a.md` if X. ${" + "SKILL" * 80_000 + "\nscripts/" + "a.." * 30_000 + "\n",
              files={"references/a.md": "](" * 80_000 + "\n" + "](a#" * 40_000 + "\n" + "](x " + '"' * 50_000 + "\n",
                     "scripts/blank.py": "import argparse\n" + "\n" * 300_000 + "x = 1\n",
@@ -529,9 +718,23 @@ with tempfile.TemporaryDirectory() as tmp:
                                         + "git(" * 10_000 + "\n" + "x in (" * 10_000 + "\n" + '"checkout",' * 10_000 + "\n",
                     "scripts/quotes.py": "import argparse\n" + "'''x\n" + '"""y\n' * 30_000 + "rb" * 100_000 + "\n",
                     "scripts/hashes.py": "import argparse\n" + "#" * 100_000 + "\nx = 1 " + "# lint: no-dry-run: a b " * 20_000 + "\n",
-                    "scripts/read.sh": "echo usage\nread " + "-a " * 50_000 + "\nread -" + "a" * 100_000 + "\nrm" + " " * 100_000 + "\n"})
-    code, e, w = lint(str(d))
+                    "scripts/read.sh": "echo usage\nread " + "-a " * 50_000 + "\nread -" + "a" * 100_000 + "\nrm" + " " * 100_000 + "\n"
+                                       + ("read" + " " * 95 + "-") * 6000 + "\n",
+                    "scripts/words.py": "import argparse\n" + "git_" * 80_000 + "(\n",
+                    "scripts/words.js": 'console.log("usage")\n' + "git(a, " * 20_000 + "\n" + '"git", ' * 20_000 + "\n",
+                    "scripts/tokens.py": "import argparse\nx = [\n" + ('"git", ' * 600 + "\n") * 20 + "]\n" + ("git(" + '"-C", ' * 800 + ")\n") * 10,
+                    "scripts/nested.py": "import argparse\ny = " + "(\n" * 20_000,
+                    "scripts/flags.sh": "echo usage\n" + ("a|" * 2000 + "\n") * 20 + ";;" * 30_000 + "\n" + "= " * 30_000 + "\n"
+                                        + "git checkout" + " x" * 30_000 + "\n" + "curl " * 30_000 + "\n"})
+    try:
+        p = subprocess.run([sys.executable, str(HERE / "lint_skill.py"), str(d)], capture_output=True, text=True, timeout=SLOW_LIMIT)
+    except subprocess.TimeoutExpired:
+        raise AssertionError(f"the lint took over {SLOW_LIMIT} seconds on the inputs written to be slow") from None
+    code, e, w = p.returncode, " | ".join(json.loads(p.stdout)["errors"]), " | ".join(json.loads(p.stdout)["warnings"])
     assert code == 1 and e.startswith("referenced file does not exist: scripts/a..a..") and " | " not in e, f"{code} {e[:300]}"
+    for name, why in (("gits.py", "a line of over 5000 characters"), ("quotes.py", ""), ("words.py", "a line of over 5000 characters"), ("nested.py", "")):
+        assert f"scripts/{name}: not read as Python ({why}" in w, f"{name} cannot be tokenized, and the lint says so: {w[:600]}"
+    assert "tokens.py" not in w and "blank.py" not in w, "these two are read with the tokenizer: " + w[:600]
     d = make(c, "slow-front", head="metadata: x" + " " * 900_000 + "y\n")
     assert lint(str(d)) == (0, "", ""), "a frontmatter value with a long run of spaces"
 

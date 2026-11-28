@@ -6,6 +6,9 @@ Usage:
   python3 scripts/scaffold.py --name pdf-forms --dest plugins --description "..." --plugin   # plugins/pdf-forms/{manifests,skills/pdf-forms}
 Flags: --dry-run (list files, write nothing), --force (overwrite existing files).
 Prints JSON {"created" | "would_create": [...], "skill_dir": "..."}. Errors go to stderr. Exit codes: 0 ok, 1 files exist (no --force), 2 bad input or a target that cannot be written.
+The run checks every file and folder it is to write before it writes the first one, so on exit 1 or 2 nothing was
+written, and --dry-run exits with the same code and message as the run without it would. (A target that changes
+between the check and the write can still stop a run part way; that is exit 2 too.)
 Nothing is written through a symlink inside the new folder: if <dest>/<name>, or a folder or file to be written in it, is a
 symlink, the run is refused, also with --force. --dest itself may be a symlink or lie under one (a linked skills folder).
 """
@@ -13,7 +16,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -25,6 +30,25 @@ def render(src: Path, values: dict[str, str]) -> str:
     for k, v in values.items():
         text = text.replace("{{" + k + "}}", v)
     return text
+
+
+def kind(p: Path) -> str:
+    """"link", "dir" or "file" (anything else that is there); "" for a path that is not there. Does not follow a symlink."""
+    try:
+        mode = os.lstat(p).st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return ""
+    return "link" if stat.S_ISLNK(mode) else "dir" if stat.S_ISDIR(mode) else "file"
+
+
+def blocked(p: Path) -> str:
+    """Why p, which is not there, cannot be created; "" when it can. Looks at the nearest folder above it that exists."""
+    p = p.parent
+    while not kind(p):
+        p = p.parent
+    if not stat.S_ISDIR(os.stat(p).st_mode):
+        return f"{p} is not a folder"
+    return "" if os.access(p, os.W_OK | os.X_OK) else f"no permission to write in {p}"
 
 
 def main() -> int:
@@ -60,24 +84,40 @@ def main() -> int:
     if args.plugin:
         plan += [(p, root / p.relative_to(ASSETS / "plugin")) for p in (ASSETS / "plugin").rglob("*") if p.is_file()]
 
-    links = sorted({str(p) for _, d in plan for p in (d, *d.parents) if (p == root or root in p.parents) and p.is_symlink()})
-    if links:
-        print(json.dumps({"error": "refusing to write through a symlink", "symlinks": links}), file=sys.stderr)
-        return 2
-    existing = [str(d) for _, d in plan if d.exists()]
-    if existing and not args.force:
-        print(json.dumps({"error": "files exist; re-run with --force to overwrite", "existing": existing}), file=sys.stderr)
-        return 1
-    if not args.dry_run:
-        try:
-            for src, dst in plan:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                dst.write_text(render(src, values), encoding="utf-8")
-            for d in ("references", "scripts", "learnings/proposed"):
-                (skill_dir / d).mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            print(f"cannot write: {e}", file=sys.stderr)
+    # Everything that can stop the run is looked up before the first write, and in a --dry-run too, so a run that
+    # cannot write every file writes none, and --dry-run reports the same refusal as the real run.
+    folders = [skill_dir / d for d in ("references", "scripts", "learnings/proposed")]
+    try:
+        links = sorted({str(p) for _, d in plan for p in (d, *d.parents) if (p == root or root in p.parents) and kind(p) == "link"})
+        if links:
+            print(json.dumps({"error": "refusing to write through a symlink", "symlinks": links}), file=sys.stderr)
             return 2
+        problems = set()
+        for _, d in plan:
+            k = kind(d)
+            problems.add(f"{d} is a folder; a file is to be written there" if k == "dir"
+                         else f"no permission to overwrite {d}" if k and args.force and not os.access(d, os.W_OK)
+                         else "" if k else blocked(d))
+        for d in folders:
+            k = kind(d)
+            problems.add(f"{d} is a file; a folder is needed there" if k == "file" else "" if k else blocked(d))
+        if problems - {""}:
+            print(json.dumps({"error": "cannot write", "problems": sorted(problems - {""})}), file=sys.stderr)
+            return 2
+        existing = [str(d) for _, d in plan if kind(d)]
+        if existing and not args.force:
+            print(json.dumps({"error": "files exist; re-run with --force to overwrite", "existing": existing}), file=sys.stderr)
+            return 1
+        texts = [(dst, render(src, values)) for src, dst in plan]  # every template is read before any file is written
+        if not args.dry_run:
+            for dst, text in texts:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text(text, encoding="utf-8")
+            for d in folders:
+                d.mkdir(parents=True, exist_ok=True)
+    except OSError as e:  # also a name the file system refuses, or a folder that may not be looked into
+        print(f"cannot write: {e}", file=sys.stderr)
+        return 2
     print(json.dumps({"created" if not args.dry_run else "would_create": [str(d) for _, d in plan],
                       "skill_dir": str(skill_dir)}, indent=2))
     return 0

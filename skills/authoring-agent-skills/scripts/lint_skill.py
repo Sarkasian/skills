@@ -10,59 +10,101 @@ Exit codes: 0 clean or warnings only, 1 lint errors, 2 bad input or a file that 
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
 import sys
+import tokenize
 from pathlib import Path
 
 SPEC_KEYS = {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
 KNOWN_HOST_KEYS = {"disable-model-invocation", "user-invocable", "paths", "when_to_use", "context",
                    "agent", "model", "effort", "hooks", "argument-hint", "disallowed-tools"}
 MAX_CHARS = 1_000_000  # read at most this much of any file; a skill file is far smaller
+MAX_LINE = 5000  # a .py file with a longer line is not tokenized: the tokenizer of some Python versions is slow on one
 # Folders under scripts/ that hold code the skill's author did not write, or files that are wrong on purpose.
 SKIP_DIRS = {"node_modules", "venv", "vendor", "third_party", "__pycache__", "fixtures", "dist", "build"}
 SIDE_EFFECT = re.compile(r"\b((deploy|publish|push|send|delete|drop|merge|email)(e?s|ing)?|post(s|ing)? to)\b", re.I)
 BOUNDARY = re.compile(r"\bnot for\b|\bdo not use\b|\bnot when\b", re.I)
 HARNESS_TOOLS = re.compile(r"\b(StrReplace|Bash\(|the (Read|Write|Grep|Glob|Edit) tool|activate_skill)\b")
-# The two patterns below are written so that this file does not match them. A gap inside a pattern is capped
-# (GAP characters on one line), so no input makes a search slow.
+# How a script is read. A .py file goes through the standard tokenizer (read_python below): its comments and
+# docstrings are left out, and a string literal is told apart from code. A .sh, .js or .ts file, and a .py file that
+# does not tokenize, is read with the patterns marked "line rules": whole-line comments are dropped and everything
+# else counts as code, so there a comment after code or a string can still match.
+# The patterns below are written so that this file does not match them. Each one is bounded: a gap or a run of
+# white space between two parts has a fixed maximum length, and no open-ended repeat sits inside another.
+S = r"\s{0,80}"  # white space between two arguments, newlines included
+Q = "[\"']"
+D = "[\"'`]"
 # Calls that change files on this machine or in the local repository. A waiver comment can cover these.
-# "merge" must end the word: git merge-base and its like only read. The last three are argument pairs, as passed
-# to subprocess or to a git(...) helper: "worktree", "remove"; "branch", "-D"; "checkout", ..., "--" (a file restore).
-GAP = r"[^\n]{0,400}"
+# "merge" must end the word: git merge-base and its like only read.
 LOCAL_CHANGE = re.compile(
     r"os\.(remove|unlink|rmdir|removedirs|replace)\(|shutil\.(rmtree|move)\(|\.unlink\(|\brm\s+-[a-z]*[rf]"
     r"|^[ \t]*rm\s+[\"$\w./~-]|[\"']rm[\"'],|\bgit\s+(merge|clean|reset\s+--hard)(?![\w-])"
-    r"|[\"']git[\"']," + GAP + r"[\"'](merge|clean)[\"']|[\"']worktree[\"'],\s*[\"']remove[\"']"
-    r"|[\"']branch[\"'],\s*[\"']-D[\"']|[\"']checkout[\"']," + GAP + r"[\"']--[\"']", re.M)
+    r"|\bgit\s+worktree\s+remove\b|\bgit\s+branch\s+-D\b|\bgit\s+checkout\s[^\n;|&)]{0,200}?(?<=\s)--(?=[\s\"']|$)", re.M)
 # Calls that change something outside this machine or the repository. A waiver does not cover these.
-# The third form is a "push" argument in a call to a helper whose name starts with git: git(top, "push").
 REMOTE_CHANGE = re.compile(
-    r"\bgit\s+push\b|[\"']git[\"']," + GAP + r"[\"']push[\"']|(?<![A-Za-z])git\w*\([^)\n]{0,400}[\"']push[\"']"
-    r"|requests\.(post|put|patch|delete)\("
-    r"|method=[\"'](POST|PUT|PATCH|DELETE)[\"']|\bsmtplib\b|\bcurl\b" + GAP + r"-X\s*(POST|PUT|PATCH|DELETE)"
+    r"\bgit\s+push\b|requests\.(post|put|patch|delete)\("
+    r"|method=[\"'](POST|PUT|PATCH|DELETE)[\"']|\bsmtplib\b|\bcurl\b[^\n]{0,400}-X\s{0,10}(POST|PUT|PATCH|DELETE)"
     r"|\b(kubectl|terraform)\s+(apply|delete|destroy)|\bDROP\s+TABLE|\bDELETE\s+FROM|\bTRUNCATE\s+\w"
     r"|\b(npm|cargo)\s+publish|\btwine\s+upload|\bgh\s+pr\s+merge|\bdocker\s+push|\baws\s+s3\s+rm")
-# The flag counts only where the script defines or tests it, not where a string or comment mentions it:
-# an argparse, click, typer or commander option (the call may span lines), a shell case branch, a comparison,
-# a line that reads argv, a membership test ("--dry-run" in args, arg in ("-n", "--dry-run")), a case label,
-# or a "dry-run" key in an options object (Node parseArgs, yargs).
-DRY_RUN_FLAG = re.compile(
-    r"(add_argument|[oO]ption|includes)\([^)]{0,400}--dry-run|--dry-run[|)]|==?\s*[\"']?--dry-run|argv" + GAP + r"--dry-run"
-    r"|[\"']--dry-run[\"']\s+in\b|\bin\s*[(\[{][^)\]}\n]{0,400}--dry-run|\bcase\s+[\"']--dry-run|[\"']dry-run[\"']\s*:\s*\{")
+# A git command given as arguments. It is read from a list or tuple that holds the string "git", or from a call to
+# a git helper: a function named git, with nothing but the words below around it (run_git, _git_out, gitCmd; not
+# git_log, github_events). The subcommand is the first string after "git" (in a helper: the first string) that is
+# not an option; the argument after -C, -c, --git-dir, --work-tree or --namespace is that option's value.
+HELPER = (r"_{0,2}(?:(?:run|call|exec|do|sh|check|try)_?){0,2}git"
+          r"(?:_?(?:run|output|out|command|cmd|call|exec|check|lines|text|quiet|stdout|capture|ok)){0,2}_{0,2}")
+GIT_HELPER = re.compile(HELPER, re.I)
+GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+# Line rules for the same: after "git" (and the [ of a list that follows it, as in execFile("git", [...])), or after
+# the helper's bracket, up to six arguments that are bare names or options, then the subcommand. A string that is not an option ends the search, so "git", "log", "push" is no push.
+GIT_ARGS = (r"(?:" + Q + "git" + Q + S + "," + S + r"(?:\[" + S + r")?|(?i:(?<![\w$])" + HELPER + r")\(" + S + r"\[?" + S + ")"
+            r"(?:(?:[\w.$]{1,80}|" + Q + r"-[^\"'\n]{0,80}" + Q + ")" + S + "," + S + "){0,6}")
+REMOTE_ARGS = re.compile(GIT_ARGS + Q + "push" + Q)
+LOCAL_ARGS = re.compile(
+    GIT_ARGS + "(?:" + Q + "(?:merge|clean)" + Q + "|" + Q + "reset" + Q + S + "," + S + Q + "--hard" + Q
+    + "|" + Q + "worktree" + Q + S + "," + S + Q + "remove" + Q + "|" + Q + "branch" + Q + S + "," + S + Q + "-D" + Q
+    + "|" + Q + "checkout" + Q + "(?:" + S + "," + S + r"(?:[\w.$]{1,80}|" + Q + r"[^\"'\n]{0,80}" + Q + ")){0,6}?"
+    + S + "," + S + Q + "--" + Q + ")")
+# Where --dry-run counts as a flag the script has. In a .py file (read_python) it is a string literal that holds
+# the flag and nothing but flags ("--dry-run", "-n, --dry-run", "--dry-run/--no-dry-run") and stands in one of these places:
+#   1. a positional argument of add_argument(...), add_option(...), option(...) or Option(...);
+#   2. next to == or !=, or before "in" or "not in" ("--dry-run" in args);
+#   3. an item of a list, tuple or set that follows a membership "in" (arg in ("-n", "--dry-run"); not a for loop);
+#   4. the argument of .count(...), .index(...), .remove(...) or .startswith(...);
+#   5. a pattern of a case line (case "--dry-run":).
+# A parameter "dry_run:" also counts in a file that names typer, which makes the flag from the parameter name.
+# Nowhere else: not in a comment, a docstring, a help text, an f-string, an assignment or another tool's arguments.
+OPTION_CALLS = {"add_argument", "add_option", "option", "Option"}
+ARGV_METHODS = {"count", "index", "remove", "startswith"}
+FLAG = "--dry-run"
+# Line rules for the flag: the first string of an option call (after up to three short flags), with or without
+# the two dashes (yargs); a shell case label; a comparison with == or !=; a shell test with a single =;
+# includes/indexOf/has with the flag alone; a JavaScript case label; a "dry-run" key of an options object
+# (Node parseArgs, yargs options).
+DRY_RUN_LINE = re.compile(
+    r"(?:\badd_argument|\badd_option|\.option|\.requiredOption|\.addOption|\.boolean|\bOption)\(" + S
+    + "(?:" + D + r"-\w" + D + S + "," + S + "){0,3}" + D + r"(?:-\w,?[ \t]{0,4})?(?:--)?dry-run(?![\w-])"
+    r"|(?:^|;;|\bcase\b[^\n]{1,80}?\bin\b)[ \t]*\(?(?:[^\s|()]{1,40}[ \t]*\|[ \t]*){0,8}[\"']?--dry-run(?:=\*)?[\"']?"
+    r"[ \t]*(?:\|[ \t]*[^\s|()]{1,40}[ \t]*){0,8}\)"
+    r"|[=!]==?\s{0,20}" + D + r"?--dry-run(?![\w-])|" + D + "--dry-run" + D + r"\s{0,20}[=!]==?"
+    r"|(?<=[ \t])=[ \t]{1,20}[\"']?--dry-run[\"']?(?=[ \t]*(?:\]|;[ \t]*then\b|&&|\|\|))"
+    r"|\[[ \t]{1,20}[\"']?--dry-run[\"']?[ \t]{1,20}=[ \t]"
+    r"|\.(?:includes|indexOf|has)\(\s{0,20}" + D + "--dry-run" + D + r"\s{0,20}\)"
+    r"|\bcase\s{1,20}" + D + "--dry-run" + D + r"\s{0,20}:|" + D + "dry-run" + D + r"\s{0,20}:\s{0,20}\{", re.M)
 # A comment (whole line, or after code) "lint: no-dry-run: <reason of three words or more>". Group 1 is the code before it.
-WAIVER = re.compile(r"(?m)^(.*?)(?:#|//)[ \t]*lint: no-dry-run:[ \t]*\S+(?:[ \t]+\S+){2,}")
+WAIVER = re.compile(r"(?m)^(.*?)(?:#|//)[ \t]*lint: no-dry-run:[ \t]*\S+[ \t]+\S+[ \t]+\S")
 COMMENT_LINE = re.compile(r"(?m)^[ \t]*(#|//).*$")
-# Any triple-quoted string: one that starts its own line (a docstring), or else one that follows code (a value,
-# group 2). They are matched in order from the top of the file, so the quotes that close one string are never
-# read as the start of the next.
-TRIPLE_QUOTED = re.compile(r"(?m)^[ \t]*[rRbBuUfF]{0,2}(\"\"\"|''')[\s\S]*?\1|((\"\"\"|''')[\s\S]*?\3)")
+# A prompt that waits for a person. The shell form allows up to ten flags, each with or without a value (-t 5),
+# before the one that holds p.
+INTERACTIVE = {".py": re.compile(r"(?<![\w.])input\(|getpass\.getpass\("),
+               ".sh": re.compile(r"\bread[ \t]+(?:-\w{1,20}[ \t]+(?:[^-\s]\S{0,40}[ \t]+)?){0,10}-\w{0,20}p")}
 # A Markdown link target (its #fragment and "title" are left out), or a references/, scripts/ or assets/ path
 # anywhere in the text (so inside a command too), also behind a ${...SKILL...}/ variable.
 # A leading ./ is the skill root too. Group 1 is the link target, group 3 the bare path. The target, its fragment
 # and the variable name are capped in length, and target and fragment are each matched inside a lookahead, which
-# is never re-tried shorter: so no input makes the search slow. A longer target is no path a file system holds.
+# is never re-tried shorter. A longer target is no path a file system holds.
 LINK = re.compile(r"\]\((?=([^)#\s]{1,500}))\1(?:#(?=([^)\s]{0,500}))\2)?(?:\s+\"[^\"]*\")?\)"
                   r"|(?:\$\{?\w{0,40}SKILL\w{0,40}\}?/|(?<![\w./<>\\-])(?:\./)?)"
                   r"((?:references|scripts|assets)[/\\][^`\s)\"',;#]*[^`\s)\"',;#.:?!*\]}|>])")
@@ -76,11 +118,140 @@ def read(p: Path, errors: str = "strict") -> str:
         raise OSError(f"{p}: not UTF-8 ({e.reason} at byte {e.start})") from None
 
 
-def docstrings_out(code: str) -> str:
-    """Drop each triple-quoted string that starts its own line (a docstring); keep one that follows code (a value)."""
-    if '"' * 3 not in code and "'" * 3 not in code:
-        return code
-    return TRIPLE_QUOTED.sub(r"\2", code)  # group 2 is empty for a docstring
+def git_change(helper: bool, strings: list[tuple[int, str]]) -> tuple[str, str]:
+    """("outside" | "things" | "", the git words) for one bracket group; strings holds (argument number, text)."""
+    if not helper:
+        at = [n for n, (_, text) in enumerate(strings) if text == "git"]
+        if not at:
+            return "", ""
+        strings = strings[at[0] + 1:]
+    words: list[str] = []
+    value_at = -1
+    for n, text in strings:
+        if words:
+            words.append(text)
+        elif text in GIT_VALUE_OPTIONS:
+            value_at = n + 1
+        elif n != value_at and not text.startswith("-"):
+            words.append(text)
+    if not words:
+        return "", ""
+    sub, rest = words[0], words[1:]
+    said = "git " + " ".join(words[:2])
+    if sub == "push":
+        return "outside", said
+    if sub in ("merge", "clean") or (sub == "reset" and "--hard" in rest) or (sub == "worktree" and rest[:1] == ["remove"]) \
+            or (sub == "branch" and "-D" in rest) or (sub == "checkout" and "--" in rest):
+        return "things", said
+    return "", ""
+
+
+def read_python(raw: str) -> tuple[str, bool, bool, str, str]:
+    """Read a .py file with the tokenizer: (its text without comments and docstrings, has the --dry-run flag,
+    has a waiver comment, a git call that changes something outside, a git call that changes something here).
+    Raises ValueError with the reason when the file cannot be read this way; the caller then uses the line rules."""
+    if max(map(len, raw.split("\n"))) > MAX_LINE:
+        raise ValueError(f"a line of over {MAX_LINE} characters")
+    try:  # slim tuples: a TokenInfo also holds its whole source line
+        toks = [(t.type, t.string, t.start, t.end) for t in tokenize.generate_tokens(io.StringIO(raw).readline)]
+    except (tokenize.TokenError, SyntaxError) as e:  # IndentationError is a SyntaxError
+        raise ValueError(str(e.args[0]) if e.args else type(e).__name__) from None
+    if any(t[0] == tokenize.ERRORTOKEN for t in toks):
+        raise ValueError("a character that is not Python")
+    OP, NAME, STRING, ENDS = tokenize.OP, tokenize.NAME, tokenize.STRING, (tokenize.NEWLINE, tokenize.ENDMARKER)
+    STARTS = (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT)
+    starts = [0]
+    for line in raw.split("\n"):
+        starts.append(starts[-1] + len(line) + 1)
+    cut: list[tuple[int, int]] = []  # comments and docstrings, as offsets into raw
+
+    def drop(t: tuple) -> None:
+        a, b = starts[t[2][0] - 1] + t[2][1], starts[t[3][0] - 1] + t[3][1]
+        if raw[a:b] != t[1]:  # never cut text at a position that is off
+            raise ValueError("token positions that do not match the text")
+        cut.append((a, b))
+
+    waived = flag = False
+    found = {"outside": "", "things": ""}
+
+    def close(group: list) -> None:
+        kind, said = git_change(group[0] == "git", group[1])
+        if kind and not found[kind]:
+            found[kind] = said
+
+    sig = []  # the tokens that matter: no comments, no line breaks inside brackets
+    for t in toks:
+        if t[0] == tokenize.COMMENT:
+            drop(t)
+            waived = waived or bool(WAIVER.match(t[1]))
+        elif t[0] != tokenize.NL:
+            sig.append(t)
+    typer = any(t[0] == NAME and t[1] == "typer" for t in sig)
+    stack: list[list] = [["", [], 0]]  # per open bracket: kind ("git", "flag" or ""), its own strings, commas so far
+    first, fors, member, i = "", 0, -1, 0  # first word of the statement; open "for"s; index of the last membership "in"
+    while i < len(sig):
+        tp, s = sig[i][0], sig[i][1]
+        before = sig[i - 1] if i else (tokenize.NEWLINE, "")
+        if tp in ENDS:
+            for group in stack:
+                close(group)
+            stack, first, fors = [["", [], 0]], "", 0
+        elif tp == STRING:
+            j = i
+            while sig[j][0] == STRING:
+                j += 1
+            # a statement made of nothing but plain strings is a docstring
+            if before[0] in STARTS and sig[j][0] in ENDS and "f" not in "".join(re.match("[A-Za-z]*", t[1]).group(0) for t in sig[i:j]).lower():
+                for t in sig[i:j]:
+                    drop(t)
+                i = j
+                continue
+            quote = re.match(r"[A-Za-z]*('''|\"\"\"|'|\")", s)
+            text = s[quote.end():len(s) - len(quote.group(1))]
+            after = sig[i + 1]
+            # "own": the string is a whole argument or item of the innermost bracket (outside brackets: also after =)
+            own = (before[0] == OP and (before[1] in ("(", "[", "{", ",") or len(stack) == 1 and before[1] == "=")
+                   or len(stack) == 1 and before[0] in STARTS) \
+                and (after[0] == OP and after[1] in (",", ")", "]", "}") or after[0] in ENDS)
+            if own:
+                stack[-1][1].append((stack[-1][2], text))
+            words = [x for x in re.split(r"[\s,/|=]+", text) if x]
+            if FLAG in words and all(x.startswith("-") for x in words) and (
+                    own and stack[-1][0] == "flag"
+                    or before[0] == OP and before[1] in ("==", "!=") or after[0] == OP and after[1] in ("==", "!=")
+                    or after[0] == NAME and (after[1] == "in" or after[1] == "not" and sig[i + 2][1] == "in")
+                    or first == "case" and after[0] == OP and after[1] in (":", "|")):
+                flag = True
+        elif tp == OP and s in ("(", "[", "{"):
+            kind = ""
+            if before[0] == NAME and s == "(" and GIT_HELPER.fullmatch(before[1]):
+                kind = "git"
+            elif before[0] == NAME and (s == "(" and (before[1] in OPTION_CALLS or before[1] in ARGV_METHODS and sig[i - 2][1] == ".")
+                                        or before[1] == "in" and member == i - 1):
+                kind = "flag"
+            stack.append([kind, [], 0])
+        elif tp == OP and s in (")", "]", "}"):
+            if len(stack) > 1:
+                close(stack.pop())
+        elif tp == OP and s == ",":
+            stack[-1][2] += 1
+        elif tp == NAME and s == "for":
+            fors += 1
+        elif tp == NAME and s == "in":
+            if fors:
+                fors -= 1
+            else:
+                member = i
+        elif tp == NAME and s == "dry_run" and typer and sig[i + 1][0] == OP and sig[i + 1][1] == ":":
+            flag = True
+        if not first and tp not in STARTS and tp not in ENDS:
+            first = s
+        i += 1
+    parts, at = [], 0
+    for a, b in sorted(cut):
+        parts.append(raw[at:a])
+        at = b
+    return "".join(parts) + raw[at:], flag, waived, found["outside"], found["things"]
 
 
 def on_disk(test) -> bool:
@@ -121,6 +292,32 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], str] | None:
         elif key and line.startswith((" ", "\t")):
             fm[key] = (fm[key] + " " + line.strip()).strip()
     return fm, text[end + 4:].lstrip("\n")
+
+
+def check_path(skill: Path, md: Path, body: str, doc: Path, where: str, link: bool, ref: str,
+               errors: list[str], warns: list[str]) -> tuple[list[str], str] | None:
+    """What to say about one path named in doc, as (the list it goes to, the message); None for a path that is fine."""
+    if re.match(r"[a-z]+://|mailto:", ref) or re.search(r"[<*{$\\]", ref):
+        return None
+    # a Markdown link is relative to the file that holds it, a bare path to the skill root
+    target = (doc.parent if link else skill) / ref
+    outside = ref.startswith("/") or ".." in Path(ref).parts
+    if outside and link and where and not ref.startswith("/"):
+        # a link in a reference may climb with ../ to a file of this skill: ../scripts/x.py, ../SKILL.md
+        rel = os.path.relpath(target, skill)
+        outside = rel == os.pardir or rel.startswith(os.pardir + os.sep)
+        target = skill / rel
+    if outside:
+        return warns, f"path {ref!r} is not relative to the skill root{where}"
+    if not on_disk(target.exists):
+        if link or on_disk(target.parent.is_dir):
+            return errors, f"referenced file does not exist: {ref}{where}"
+        # the skill has no such folder, so this may be a path in the user's project
+        return warns, (f"{ref}{where} is not in this skill, which has no {target.parent.relative_to(skill).as_posix()}/ folder; "
+                       f"add the file, or write a path in the user's project as <project>/{ref}")
+    if where and target.suffix == ".md" and target != md and target.relative_to(skill).as_posix() not in body:
+        return warns, f"references/{doc.name} names {ref}, which SKILL.md never names; keep references one level deep"
+    return None
 
 
 def lint(skill: Path, portable: bool, evals_dir: Path | None = None) -> dict:
@@ -180,28 +377,14 @@ def lint(skill: Path, portable: bool, evals_dir: Path | None = None) -> dict:
         errors.append("backslash in a file path; use forward slashes")
     for doc, text in docs:
         where = "" if doc == md else f" (named in references/{doc.name})"
+        said: dict[tuple[bool, str], tuple[list[str], str] | None] = {}  # a path named again in this file is not looked up again
         for m in LINK.finditer(text):
             ref = m.group(1) or m.group(3)
-            if re.match(r"[a-z]+://|mailto:", ref) or re.search(r"[<*{$\\]", ref):
-                continue
-            # a Markdown link is relative to the file that holds it, a bare path to the skill root
-            target = (doc.parent if m.group(1) else skill) / ref
-            outside = ref.startswith("/") or ".." in Path(ref).parts
-            if outside and m.group(1) and where and not ref.startswith("/"):
-                # a link in a reference may climb with ../ to a file of this skill: ../scripts/x.py, ../SKILL.md
-                rel = os.path.relpath(target, skill)
-                outside = rel == os.pardir or rel.startswith(os.pardir + os.sep)
-                target = skill / rel
-            if outside:
-                warns.append(f"path {ref!r} is not relative to the skill root{where}")
-            elif not on_disk(target.exists):
-                if m.group(1) or on_disk(target.parent.is_dir):
-                    errors.append(f"referenced file does not exist: {ref}{where}")
-                else:  # the skill has no such folder, so this may be a path in the user's project
-                    warns.append(f"{ref}{where} is not in this skill, which has no {target.parent.relative_to(skill).as_posix()}/ folder; "
-                                 f"add the file, or write a path in the user's project as <project>/{ref}")
-            elif where and target.suffix == ".md" and target != md and target.relative_to(skill).as_posix() not in body:
-                warns.append(f"references/{doc.name} names {ref}, which SKILL.md never names; keep references one level deep")
+            key = (bool(m.group(1)), ref)
+            if key not in said:
+                said[key] = check_path(skill, md, body, doc, where, key[0], ref, errors, warns)
+            if said[key]:
+                said[key][0].append(said[key][1])
 
     for ref in refs:
         if f"references/{ref.name}" not in body:
@@ -216,23 +399,36 @@ def lint(skill: Path, portable: bool, evals_dir: Path | None = None) -> dict:
         if script.is_symlink() or not script.is_file():
             warns.append(f"{name}: a symlink or not a regular file; not checked")
             continue
-        raw = read(script, "replace")
+        raw = read(script, "replace").lstrip("\ufeff")  # a byte order mark is not code
         code = COMMENT_LINE.sub("", raw)
-        src = docstrings_out(code) if script.suffix == ".py" else code
         is_test = script.stem.startswith("test_") or script.stem in {"selftest", "self_test"} or "tests" in rel.parts
         if not is_test and script.parent.name == "scripts" and "--help" not in code and "argparse" not in code and "usage" not in code.lower():
             warns.append(f"{name}: no --help/usage found")
-        if not is_test and not ("dry-run" in src and DRY_RUN_FLAG.search(src)):
-            remote, local = REMOTE_CHANGE.search(src), LOCAL_CHANGE.search(src)
+        try:
+            if script.suffix != ".py":
+                raise ValueError("not a .py file")
+            src, flag, waived, remote, local = read_python(raw)
+        except ValueError as e:  # the line rules
+            if script.suffix == ".py":
+                warns.append(f"{name}: not read as Python ({e}); checked line by line, so its docstrings, and its comments after code, count as code")
+            src, flag = code, "dry-run" in code and bool(DRY_RUN_LINE.search(code))
+            waived = any(p.count('"') % 2 == 0 and p.count("'") % 2 == 0 for p in WAIVER.findall(raw))  # not inside a string
+            git = "git" in code.lower()  # both patterns need the word, and most scripts do not hold it
+            remote, local = git and REMOTE_ARGS.search(code), git and LOCAL_ARGS.search(code)
+            remote, local = remote.group(0) if remote else "", local.group(0) if local else ""
+        if not is_test and not flag:
+            m = REMOTE_CHANGE.search(src)
+            remote = m.group(0).strip() if m else remote
+            m = LOCAL_CHANGE.search(src)
+            local = m.group(0).strip() if m else local
             if remote:
-                warns.append(f"{name}: changes something outside this machine ({remote.group(0).strip()!r}) but has no --dry-run flag; "
+                warns.append(f"{name}: changes something outside this machine ({remote!r}) but has no --dry-run flag; "
                              "add one (a 'lint: no-dry-run:' comment does not cover this)")
             # a comment "lint: no-dry-run: <reason>" in the file says a person judged the local changes safe without one
-            elif local and not any(p.count('"') % 2 == 0 and p.count("'") % 2 == 0 for p in WAIVER.findall(raw)):
-                warns.append(f"{name}: changes things ({local.group(0).strip()!r}) but has no --dry-run flag; add one, or a comment "
+            elif local and not waived:
+                warns.append(f"{name}: changes things ({local!r}) but has no --dry-run flag; add one, or a comment "
                              "'lint: no-dry-run: <reason, three words or more>' if a preview would add no safety")
-        if (script.suffix == ".py" and re.search(r"(?<![\w.])input\(|getpass\.getpass\(", src)) or \
-                (script.suffix == ".sh" and re.search(r"\bread\s+(-\w+\s+)*-\w*p", src)):
+        if script.suffix in INTERACTIVE and INTERACTIVE[script.suffix].search(src):
             errors.append(f"{name}: interactive prompt; take flags/env/stdin instead")
 
     if SIDE_EFFECT.search(BOUNDARY.split(desc)[0]) and fm.get("disable-model-invocation", "").lower() != "true":
@@ -270,7 +466,7 @@ def main() -> int:
     ap.add_argument("--evals-dir", type=Path)
     args = ap.parse_args()
     for d in (args.skill_dir, args.evals_dir):
-        if d and not d.is_dir():
+        if d and not on_disk(d.is_dir):  # a name too long for the file system is no folder either
             print(f"not a directory: {d}", file=sys.stderr)
             return 2
     try:
