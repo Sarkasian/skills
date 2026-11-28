@@ -12,7 +12,8 @@ from ad.common import (AUTO_FIXES, CHECK_TIMEOUT_S, cmd_line, _csv, ENV_MAX_PARA
                        MAX_PARALLEL_LIMIT, names, _now, PROJECT_CONFIG, REPORT_DOC, SCHEMA, SCRIPT, TASK_DIR, TRIES, _ts,
                        VERSION)
 from ad.state import locked, _quiet, resolve_max_parallel, Task, usable_max_parallel, user_config_path
-from ad.plan import apply_plan, _list, _norm_path, plan_items, read_plan_file, write_plan_file
+from ad.plan import (add_question_to_plan_file, apply_plan, _list, _norm_path, plan_items, read_plan_file,
+                     write_plan_file)
 from ad.vcs import (add_paths, changed_since, covered, dirty_files, git, git_top, has_commit, head, ignored_files, lit,
                     untracked)
 from ad.checks import check_unrunnable, run_checks, tail
@@ -78,6 +79,7 @@ def cmd_start(a):
             raise Fail("dirty_files", f"planned files have uncommitted changes: {names(clash)}", 1, "needs_user",
                        "ask the user to commit or stash them, then rerun start")
         st["start_dirty"] = dirty
+        st["start_dirty_out"] = dirty_files(top, root, outside=True)
     os.makedirs(tdir)
     task = Task(tdir)
     try:
@@ -162,7 +164,15 @@ def advance(task, st):
     patches = [r["outside"] for r in closed if r.get("outside")]
     if patches:
         out["outside_changes"] = {"patches": patches, "note": "an executor changed tracked files that belong to "
-                                  "no item; the changes did not land and are saved in these patches"}
+                                  "no item; the changes did not land and are saved in these patches. Their paths "
+                                  f"start at the top of the repository: to reuse one, run `git apply` in "
+                                  f"{st['git_top']} (from a folder below it, git skips the files outside that "
+                                  "folder without an error)"}
+    kept = [k for r in closed for k in r.get("kept_files", [])]
+    if kept:
+        out["kept_files"] = {"files": kept, "note": "a run made these new files, which belong to no item, and "
+                             "they could not be put in the main folder (`why`); each is saved at `kept`, or lost "
+                             "when `kept` is null. Tell the user"}
     if review_run:
         path = os.path.join(task.dir, "review.md")
         if os.path.isfile(path):
@@ -540,7 +550,8 @@ def cmd_block(task, a):
             st["questions"].append(q)
             it["needs"].append(q["id"])
             block["question"] = q["id"]
-            write_plan_file(task, st)  # so that the plan file has the need too, and a later `plan` sees no edit in it
+            # so that the plan file has the need too, and a later `plan` sees no edit in it
+            add_question_to_plan_file(task, st, q, it["id"])
         run = next(r for r in st["runs"] if r["id"] == it["run"])
         top = git_top(run["dir"]) if st["git_top"] and it["files"] else None
         mine = [p for p in changed_since(run["dir"], top, run["snapshot"]) if covered(p, it["files"])] if top else []
@@ -622,7 +633,13 @@ def cmd_resume(task, a):
         st["status"], st["stop"] = "active", None
         task.event("resumed", None, {"stop": was, "new_session": a.new_session})
         task.save(st)
-        return {"status": "active", "was": was, "next": cmd_line(task, "next")}
+        # `next` starts the item again as it is, and `plan` does not edit a running item: so an answer that
+        # changes the item (a wrong check command) has to reach the plan before `next`
+        asked = {q["id"] for q in st["questions"] if q.get("origin") == "block" and q["answer"] is not None}
+        waits = [it["id"] for it in st["items"] if it["status"] == "pending" and asked & set(it["needs"])]
+        return {"status": "active", "was": was, "next": (
+            f"if the answer changes item {', '.join(waits)} (a wrong `check_cmd`, another goal), first edit "
+            f"{task.plan_path} and run {cmd_line(task, 'plan')}; then " if waits else "") + cmd_line(task, "next")}
     return locked(task, go)
 
 
@@ -676,6 +693,9 @@ def finish_now(task, st):
     if st["git_top"]:
         now, before = dirty_files(st["git_top"], st["root"]), st.get("start_dirty", {})
         left = sorted(p for p, h in now.items() if before.get(p) != h and not untracked(h))
+        if "start_dirty_out" in st:  # the rest of the repository, when the root is below its top (`../` names)
+            now.update(dirty_files(st["git_top"], st["root"], outside=True))
+            before = {**before, **st["start_dirty_out"]}
         st["untracked_left"] = sorted(p for p, h in now.items() if before.get(p) != h and untracked(h))[:50]
         if left:
             raise Fail("uncommitted_changes", f"files changed during the task are not committed: "
@@ -718,6 +738,7 @@ def summary(task, st):
             "review_state": st["review_state"],  # `missing`: a review was due and its executor wrote none
             "untracked_left": st.get("untracked_left", []),
             "outside_patches": [r["outside"] for r in st["runs"] if r.get("outside")],
+            "kept_files": [k for r in st["runs"] for k in r.get("kept_files", [])],
             "branches_left": [r["branch"] for r in st["runs"] if r.get("branch_kept")],
             "max_parallel": st["max_parallel"],
             "cost": {"wall_s": round((_ts(end) - _ts(st["started_at"])).total_seconds()),

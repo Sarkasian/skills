@@ -1,6 +1,7 @@
 """Runs: grouping items, briefs, landing worktree commits, the review and the task checks."""
 from __future__ import annotations
 
+import filecmp
 import os
 import shlex
 import shutil
@@ -255,6 +256,19 @@ def restored(kept):
     return bool(kept) and kept.startswith("is saved")
 
 
+def _copy_new(src, dest):
+    """Copy a new file out of a worktree. git lists a git repository made inside one as a folder, not as files."""
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    if os.path.isdir(src) and not os.path.islink(src):
+        shutil.copytree(src, dest, symlinks=True)
+    else:
+        shutil.copy2(src, dest, follow_symlinks=False)
+
+
+def _same_file(a, b):
+    return all(os.path.isfile(x) and not os.path.islink(x) for x in (a, b)) and filecmp.cmp(a, b, shallow=False)
+
+
 def land_run(task, st, run):
     top = st["git_top"]
     picks = [line[2:] for line in git(top, "cherry", "HEAD", run["branch"], run["base"]).stdout.split("\n")
@@ -291,11 +305,29 @@ def land_run(task, st, run):
                 it["notes"].append(f"Its partial work from run {run['id']} {kept}")
     left = dirty_files(git_top(run["dir"]), run["dir"])
     left.update(outside_root(run, git_top(run["dir"])))  # and what changed in the worktree outside the root
+    links = {os.path.relpath(os.path.join(run["worktree"], p), run["dir"]).replace("\\", "/")
+             for p in run.get("links") or []}
     for p, h in left.items():                       # new files outside every item's files:
-        dest = os.path.normpath(os.path.join(st["root"], p))  # finish lists them in untracked_left
-        if untracked(h) and not os.path.lexists(dest):
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            shutil.copy2(os.path.join(run["dir"], p), dest, follow_symlinks=False)
+        if not untracked(h) or p in links:          # finish lists them in untracked_left
+            continue
+        src, dest = os.path.join(run["dir"], p), os.path.normpath(os.path.join(st["root"], p))
+        try:
+            if not os.path.lexists(dest):
+                _copy_new(src, dest)
+                continue
+            if _same_file(src, dest):
+                continue
+            why = "the main folder already has another file of that name"
+        except OSError as e:  # a copy that fails must not stop the landing
+            why = f"it could not be copied to the main folder: {e}"
+        # not dropped with the worktree: kept in the task folder, under its path from the top of the repository
+        kept = os.path.join(task.dir, "patches", f"{run['id']}-new",
+                            os.path.relpath(src, run["worktree"]))
+        try:
+            _copy_new(src, kept)
+        except OSError:
+            kept = None
+        run.setdefault("kept_files", []).append({"file": p, "why": why, "kept": kept})
     outside = [p for p, h in left.items() if not untracked(h)]  # tracked edits no item owns go with the worktree
     if outside:
         patch = os.path.join(task.dir, "patches", f"{run['id']}-outside.patch")

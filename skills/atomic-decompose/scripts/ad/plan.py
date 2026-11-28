@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import sys
 
 from ad.common import Fail, QUESTION_TYPES, TASK_DIR
@@ -91,10 +92,11 @@ def plan_problems(st):
         if not it["files"] and not (it["check"] or it["check_cmd"]):
             probs.append(f"{name}: a read-only item needs `check` (points to judge its result by)")
         for f in it["files"]:
-            if f.rstrip("/") == ".":
+            norm = posixpath.normpath(f) if f else ""  # `pkg/..` is the root too, and `pkg/../..` is above it
+            if norm == ".":
                 probs.append(f"{name}: file {f!r} is the whole root; name the files or folders the item changes")
                 continue
-            if not f or os.path.isabs(f) or f == ".." or f.startswith("../") or "/../" in f \
+            if not f or os.path.isabs(f) or norm == ".." or norm.startswith("../") or "/../" in f \
                     or f.split("/")[0] in (TASK_DIR, ".git"):
                 probs.append(f"{name}: file {f!r} must be a path inside the root, not under .git/ or {TASK_DIR}/")
         for c in it["covers"]:
@@ -227,6 +229,29 @@ def apply_plan(st, plan, task):
                    "needs_fix", "fix every listed problem in the plan file, then rerun the same command")
     write_plan_file(task, st)
     return out
+
+
+def add_question_to_plan_file(task, st, q, item_id):
+    """Put a question that `block` asked, and the item's need of it, into plan.json, and change nothing else in
+    the file: it may hold edits the coordinator has not applied with `plan` yet. A missing file is written from
+    the state. A file that is not a plan (not JSON, perhaps half written at this moment) or that does not have
+    the item is left as it is; the state has the question either way."""
+    if not os.path.exists(task.plan_path):
+        return write_plan_file(task, st)
+    try:
+        plan = read_plan_file(task.plan_path)
+    except Fail:
+        return
+    raw, known = plan.get("items"), plan.get("questions") or []
+    pairs = raw.items() if isinstance(raw, dict) else [(None, x) for x in raw] if isinstance(raw, list) else []
+    mine = [x for k, x in pairs if isinstance(x, dict) and str(x.get("id", k)) == item_id]
+    if not mine or not isinstance(known, list):
+        return
+    plan["questions"] = known + [{k: q[k] for k in ("id", "type", "text", "default", "because")}]
+    for x in mine:
+        x["needs"] = [n for n in _list(x.get("needs")) if n != q["id"]] + [q["id"]]
+    with open(task.plan_path, "w", encoding="utf-8", errors="surrogateescape") as f:
+        json.dump(plan, f, ensure_ascii=False, indent=1)
 
 
 def write_plan_file(task, st):

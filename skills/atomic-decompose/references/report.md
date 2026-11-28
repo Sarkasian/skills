@@ -10,8 +10,9 @@ When the action is `report`, the output is the summary: `ad finish --task <T>` p
    - failed items and why;
    - review gaps. When `review_state` is `missing`, say that the work was to be reviewed and no review was written, so it is not reviewed;
    - `changed_answers` and the items they affect;
-   - `untracked_left`: new files the task left that no commit holds;
-   - `outside_patches`: changes an executor made to files of no item. They did not land and are saved in these patch files;
+   - `untracked_left`: new files the task left that no commit holds. A name that starts with `../` is outside the task's root, elsewhere in the repository;
+   - `outside_patches`: changes an executor made to files of no item. They did not land and are saved in these patch files. Their paths start at the top of the git repository, so `git apply` reuses one only when it is run there: from a folder below it, git skips the files outside that folder without an error;
+   - `kept_files`: new files a run made that belong to no item and could not be put in the main folder, each with `why` (another file of that name is there, or the copy failed). The run's file is saved at `kept`; when `kept` is null it is lost;
    - `branches_left`: branches that hold an attempt that clashed and was redone. The user may delete them;
    - the cost;
    - each `unconfirmed_defaults` entry, for the user to confirm.

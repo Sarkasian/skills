@@ -1358,6 +1358,161 @@ def test_a_long_list_of_names_is_cut_in_the_error():
     check("f19.txt and 5 more" in err and "f20.txt" not in err, "[M8] start's dirty_files error cuts a long list")
 
 
+# ---------------------------------------------------------------- 0.4.0: the third review's fixes
+
+def two_runs_below_top():
+    """Two worktree runs with the root below the top; both items are done. Returns (top, root, task, r1, r2)."""
+    top, root = below_top()
+    t, _ = start(root, [item("Mod", ["mod.py"], check_cmd=["true"]), item("Other", ["other.py"], check_cmd=["true"])],
+                 check_cmd=())
+    r1, r2 = state(t)["runs"]
+    append(os.path.join(r1["dir"], "mod.py"), "A = 2\n")
+    run("done", "1", "--task", t)
+    append(os.path.join(r2["dir"], "other.py"), "X = 2\n")
+    run("done", "2", "--task", t)
+    return top, root, t, r1, r2
+
+
+def test_a_git_repository_made_in_a_worktree_lands():
+    top, root, t, r1, _ = two_runs_below_top()
+    for where in (os.path.join(r1["worktree"], "vendor", "lib"), os.path.join(r1["dir"], "inner")):
+        os.makedirs(where)  # git status names such a folder, not the files in it
+        sh(where, "git", "init", "-q")
+        write(os.path.join(where, "f.txt"), "v\n")
+    out, _ = run("next", "--task", t)
+    check(out["action"] == "review" and log_subjects(top)[:2] == ["Other", "Mod"] and "kept_files" not in out,
+          "[T1] a run that leaves a git repository of its own lands, outside the root and inside it")
+    check(read(os.path.join(top, "vendor", "lib", "f.txt")) == "v\n" and read(os.path.join(root, "inner", "f.txt")) == "v\n"
+          and os.path.isdir(os.path.join(top, "vendor", "lib", ".git")) and not os.path.exists(r1["worktree"]),
+          "[T1] and the folder is copied to the main folder whole")
+
+
+def test_two_runs_that_make_the_same_new_file():
+    top, root, t, r1, r2 = two_runs_below_top()
+    for r, text in ((r1, "one\n"), (r2, "two\n")):
+        write(os.path.join(r["worktree"], "notes.txt"), text)  # outside the root
+        write(os.path.join(r["dir"], "gen.txt"), text)          # inside it
+        write(os.path.join(r["dir"], "same.txt"), "same\n")     # the same in both: nothing to tell
+    append(os.path.join(r2["worktree"], "top.txt"), "a late edit outside the root\n")
+    os.makedirs(os.path.join(r1["worktree"], "blocker"))
+    write(os.path.join(r1["worktree"], "blocker", "x.txt"), "x\n")
+    write(os.path.join(top, "blocker"), "a file where the run has a folder\n")  # so the copy cannot be made
+    out, _ = run("next", "--task", t)
+    kept = out["kept_files"]["files"]
+    failed = kept.pop(0)
+    check(failed["file"] == "../blocker/x.txt" and "could not be copied" in failed["why"]
+          and read(failed["kept"]) == "x\n" and log_subjects(top)[:2] == ["Other", "Mod"],
+          f"[T1] a new file that cannot be copied does not stop the landing, and is kept and reported: {failed}")
+    check(read(os.path.join(top, "notes.txt")) == "one\n" and read(os.path.join(root, "gen.txt")) == "one\n",
+          "[T2] the first run's new files are in the main folder")
+    check([(k["file"], k["kept"]) for k in kept] == [
+        ("gen.txt", os.path.join(t, "patches", "r2-new", "pkg", "gen.txt")),
+        ("../notes.txt", os.path.join(t, "patches", "r2-new", "notes.txt"))]
+        and all(read(k["kept"]) == "two\n" and "already has another file" in k["why"] for k in kept),
+        f"[T2] the second run's files of the same names are kept in the task folder and reported: {kept}")
+    note = out["outside_changes"]["note"]
+    check(f"`git apply` in {top} " in note, "[T4] the note on an outside patch names the folder to apply it in")
+    sh(top, "git", "apply", out["outside_changes"]["patches"][0])
+    check("a late edit" in read(os.path.join(top, "top.txt")), "[T4] and applied there, the patch changes the file")
+    sh(top, "git", "checkout", "top.txt")
+    write(os.path.join(t, "review.md"), "no findings\n")
+    run("next", "--task", t)
+    out, _ = run("finish", "--task", t)
+    check(out["kept_files"] == [failed] + kept, "[T2] the summary lists them too")
+    check(out["untracked_left"] == ["../blocker", "../notes.txt", "gen.txt", "same.txt"],
+          f"[T3] finish lists the new files left outside the root as well: {out['untracked_left']}")
+
+
+def test_finish_leaves_out_what_was_outside_the_root_before():
+    top, root = below_top()
+    write(os.path.join(top, "mine.txt"), "the user's, from before the task\n")
+    t, _ = start(root, [item("Mod", ["mod.py"], check_cmd=["true"])], check_cmd=())
+    append(os.path.join(root, "mod.py"), "A = 2\n")
+    write(os.path.join(top, "new.txt"), "n\n")
+    run("done", "1", "--task", t)
+    out, _ = run("next", "--task", t)
+    check(out["untracked_left"] == ["../new.txt"], f"[T3] and not a file that was there at start: {out['untracked_left']}")
+
+
+def test_a_path_that_is_the_root_by_another_name():
+    top, _ = below_top()
+    for whole in ("pkg/..", "pkg/./.."):
+        err = refused("plan_invalid", 2, "start", "--root", top, "--statement", "s", "--plan",
+                      plan_file([item("A", [whole], check_cmd=["true"])], check_cmd=()))
+        check("whole root" in err and not os.path.exists(os.path.join(top, C.TASK_DIR)),
+              f"[T5] a path that comes out at the root is refused: {whole!r}")
+
+
+def test_pathspec_variables_of_the_user():
+    for var in ad.vcs.PATHSPEC_VARS:
+        if var == "GIT_ICASE_PATHSPECS" and os.name == "nt":
+            continue
+        root = repo({"a*.py": "star\n", "ab.py": "plain\n"})
+        with mock.patch.dict(os.environ, {var: "1"}):
+            t, _ = start(root, [item("A", ["a*.py"], check_cmd=["true"])], check_cmd=())
+            append(os.path.join(root, "a*.py"), "work\n")
+            out, _ = run("done", "1", "--task", t)
+        check(out["commit"] and sh(root, "git", "status", "--porcelain") == "",
+              f"[T6] an item commits with {var} set in the user's environment")
+
+
+def test_block_keeps_the_coordinators_plan_edits():
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"])])
+    path = os.path.join(t, "plan.json")
+
+    def unapplied(p):
+        p["requirements"].append("r2")
+        p["items"].append(item("New", ["other.py"], covers="R2"))
+        p["note to self"] = "a key the script does not know"
+    edit_plan(t, unapplied)
+    run("block", "1", "--question", "Which?", "--task", t)
+    plan = json.loads(read(path))
+    check(plan["items"][-1]["title"] == "New" and plan["requirements"] == ["r1", "r2"] and "note to self" in plan,
+          "[T7] block leaves the coordinator's edits that `plan` has not applied yet in plan.json")
+    check(plan["items"][0]["needs"] == ["Q1"] and [q["text"] for q in plan["questions"]] == ["Which?"],
+          "[T7] and adds its question and the item's need of it")
+    run("next", "--task", t)
+    run("answer", "--id", "Q1", "--text", "this", "--task", t)
+    run("resume", "--task", t)
+    out, _ = run("plan", "--task", t)
+    check(out["added"] == ["2"] and out["edited"] == [] and it(t, "1")["needs"] == ["Q1"],
+          "[T7] the next plan adds the new item, and does not take item 1 for edited")
+    t, _ = start(root, [item("B", ["README.md"])])
+    path = os.path.join(t, "plan.json")
+    os.remove(path)
+    run("block", "1", "--question", "Why?", "--task", t)
+    check(json.loads(read(path))["items"][0]["needs"] == ["Q1"], "[T7] a missing plan.json is written from the state")
+    t, _ = start(root, [item("C", ["other.py"])])
+    path = os.path.join(t, "plan.json")
+    write(path, '{"items": [half written')
+    run("block", "1", "--question", "How?", "--task", t)
+    check(read(path) == '{"items": [half written' and state(t)["questions"][0]["text"] == "How?",
+          "[T7] a plan.json that is not JSON is left as it is; the state has the question")
+
+
+def test_resume_names_plan_after_a_blocks_answer():
+    root = repo()
+    t, _ = start(root, [item("A", ["mod.py"], check_cmd=["no-such-command-xyz"])], check_cmd=())
+    task = ad.state.Task(t)
+    run("block", "1", "--question", "the check is wrong", "--task", t)
+    run("next", "--task", t)
+    run("answer", "--id", "Q1", "--text", "use true", "--task", t)
+    out, _ = run("resume", "--task", t)
+    nxt = out["next"]
+    check("item 1" in nxt and task.plan_path in nxt and 0 < nxt.find(C.cmd_line(task, "plan")) < nxt.find(
+        C.cmd_line(task, "next")) and nxt.endswith(C.cmd_line(task, "next")),
+        f"[T8] resume after a block's answer says to run plan before next, as recovery.md does: {nxt}")
+    run("stop", "--condition", "user", "--detail", "a pause", "--task", t)
+    edit_plan(t, lambda p: p["items"][0].update(check_cmd=["true"]))
+    run("resume", "--task", t)
+    run("plan", "--task", t)
+    run("next", "--task", t)
+    out, _ = run("stop", "--condition", "user", "--detail", "a pause", "--task", t)
+    out, _ = run("resume", "--task", t)
+    check(out["next"] == C.cmd_line(task, "next"), "[T8] with the item running again, resume's next is the plain next")
+
+
 def test_docs_name_real_commands():
     skill = open(os.path.join(HERE, "..", "..", "skills", "atomic-decompose", "SKILL.md")).read()
     names = set(dc.COMMANDS) | {"start"}
@@ -1602,6 +1757,20 @@ def test_report_weekly():
     with open(marks_file, "w") as f:
         f.write("{")
     check("marks_unreadable" in report_run(*args, code=2)[1], "[API-12] a DM-10 file that is not JSON")
+
+
+def test_report_reads_a_file_name_that_is_not_utf8():
+    root = os.path.join(TMP, "weekly-odd")
+    d = os.path.join(root, "cursor", "t1")
+    os.makedirs(d)
+    os.makedirs(os.path.join(root, "marks"))
+    write(os.path.join(d, "state.json"), b'{"schema_version": 2, "status": "complete", "questions": [], '
+                                         b'"start_dirty": {"caf\xe9.txt": "x"}}')
+    write(os.path.join(d, "record.jsonl"), b'{"seq": 1, "ts": "2026-11-04T10:00:00.000Z", "event": "engaged", '
+                                           b'"ref": null, "data": {"file": "caf\xe9.txt"}}\n')
+    out, _ = report_run("weekly", "--roots", f"cursor={os.path.join(root, 'cursor')}", "--week", "2026-W45",
+                        "--marks", os.path.join(root, "marks"))
+    check(json.loads(out)["gaps"] == [], "[T9] the weekly report reads a task whose files hold a name that is not UTF-8")
 
 
 def test_max_parallel_config_chain():

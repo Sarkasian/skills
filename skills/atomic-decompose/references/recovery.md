@@ -13,7 +13,7 @@ The coordinator names failed items in the report, or retries one by editing it i
 
 ## check_broken
 
-The check command itself could not run: the command was not found, or the module is missing. It does not use up a try. If the command is wrong, the executor parks the item with `block <id> --question "the check <cmd> is wrong: <why>"`. That question stops the task (`needs_user`) like any other, and `plan` is refused while it is stopped. So the coordinator tells the user that the check is wrong and what it will run instead, records the reply with `answer`, and runs `resume`. Only then does it fix `check_cmd` in `plan.json` and run `plan`, then `next`: the item reruns with the new check.
+The check command itself could not run: the command was not found, or the module is missing. It does not use up a try. If the command is wrong, the executor parks the item with `block <id> --question "the check <cmd> is wrong: <why>"`. That question stops the task (`needs_user`) like any other, and `plan` is refused while it is stopped. So the coordinator tells the user that the check is wrong and what it will run instead, records the reply with `answer`, and runs `resume`. Only then does it fix `check_cmd` in `plan.json` and run `plan`, then `next`: the item reruns with the new check. The `next` of `resume` says the same: after an answer to an item's question it names `plan` before `next`, because `next` starts the item again as it is and `plan` does not edit a running item.
 
 ## outside_files, no_changes, no_result, not_running, out_of_order
 

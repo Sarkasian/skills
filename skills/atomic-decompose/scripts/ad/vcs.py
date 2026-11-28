@@ -10,11 +10,15 @@ import tempfile
 from ad.common import Fail, TASK_DIR
 from ad.state import _quiet
 
+PATHSPEC_VARS = ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
+
 
 def git(cwd, *args, check=True, env=None, text=True):
     """Run git in `cwd`. `text=False` gives the output as bytes, for a diff that must be kept byte for byte.
     A file name that is not UTF-8 comes back with its bytes kept (surrogateescape), so it is still that file."""
     how = {"text": True, "errors": "surrogateescape"} if text else {}
+    # These four change what a pathspec means: with GIT_LITERAL_PATHSPECS set, `:(literal)a.py` is a file name.
+    env = {k: v for k, v in (os.environ if env is None else env).items() if k not in PATHSPEC_VARS}
     try:
         p = subprocess.run(["git", "-C", cwd, *args], capture_output=True, env=env, **how)
     except FileNotFoundError:
@@ -29,7 +33,8 @@ def git(cwd, *args, check=True, env=None, text=True):
 
 def lit(paths):
     """The paths as git pathspecs that are taken as written: a file named `a*.py` or `:x` is that file, not a
-    pattern. Written on each path, not set as GIT_LITERAL_PATHSPECS, which the user's hooks would inherit."""
+    pattern. Written on each path, not set as GIT_LITERAL_PATHSPECS, which the user's hooks would inherit.
+    `git` above takes the GIT_*_PATHSPECS variables out of git's environment, so this prefix is always read."""
     return [":(literal)" + p for p in paths]
 
 
