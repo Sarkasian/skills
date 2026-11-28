@@ -6,7 +6,7 @@ Agent skills in the [Agent Skills](https://agentskills.io/specification) layout:
 | --- | --- |
 | [`atomic-decompose`](skills/atomic-decompose/SKILL.md) | Plans a substantial task as small work items, asks every question it needs from you once with a default, then works to completion from saved state: small jobs in the main session, independent parts by sub-agents in parallel. |
 | [`authoring-agent-skills`](skills/authoring-agent-skills/SKILL.md) | Designs, scaffolds, lints and evaluates agent skills and plugins: picks skill, MCP server, hook or rule, writes evals first, and checks the result with bundled scripts. |
-| [`deep-research-run`](skills/deep-research-run/SKILL.md) | Researches one question with the local-deep-research (LDR) engine: picks the cheapest tool, checks claims against primary sources and writes a sourced result file with open questions. Works alone or as the skill of an `atomic-decompose` research item. |
+| [`deep-research-run`](skills/deep-research-run/SKILL.md) | Answers one research question with sources: takes the cheapest route that can answer it, reads primary sources, tags each claim by how far it was checked and lists open questions. Uses a deep-research tool when the host has one and plain search and page reads when it does not. Works on a brief from any planner, such as an `atomic-decompose` research item, or on a direct question. |
 
 ## Install
 
@@ -32,7 +32,7 @@ Pin a release with `#<tag>` (`npx skills`) or `@<tag>` (`gh skill`). `atomic-dec
 
 The skill runs a local Python script that edits your workspace files and makes one git commit per work item on your current branch.
 
-Requirements: `python3`, plus `git` and a workspace inside a git repository when a work item changes workspace files. The skill writes task state to `<workspace>/.atomic-decompose/<task-id>/`; the `.atomic-decompose/` folder holds its own `.gitignore`, so it never shows in `git status`. Parallel work runs in git worktrees inside the task folder, on `ad/<task-id>/` branches, and both are removed once the work has landed on your branch.
+Requirements: `python3`, plus `git` and a workspace inside a git repository when a work item changes workspace files. The skill writes task state to `<workspace>/.atomic-decompose/<task-id>/`; the `.atomic-decompose/` folder holds its own `.gitignore`, so it never shows in `git status`. Parallel work runs in git worktrees inside the task folder, on `ad/<task-id>/` branches. Both are removed once the work has landed on your branch, except the branch of an attempt that clashed and was redone: it is kept, and the final summary lists it in `branches_left`. Without git there are no commits, a failed item's files are not restored, and changes outside an item's files are not detected. Not tested on Windows.
 
 Parts that share no file are worked on at the same time, at most `max_parallel` of them (an integer from 1 to 64). A task takes the first of these that is set when it starts:
 
@@ -53,17 +53,18 @@ The skill holds principles, not host-specific facts such as frontmatter keys, fo
 
 ## deep-research-run
 
-The skill has no scripts. It needs the [local-deep-research](https://github.com/LearningCircuit/local-deep-research) MCP server, and `references/config-guide.md` lists the environment variables that server reads.
+The skill has no scripts. It needs a page fetch tool, and a web search tool for anything beyond known URLs. A deep-research tool is optional; with the [local-deep-research](https://github.com/LearningCircuit/local-deep-research) MCP server, `references/local-deep-research.md` gives its tools and `references/local-model-setup.md` describes one example setup on a local model. `references/pass-limits.md` has the rules for a time limit on the whole item and for a pass that fails. The skill sends search queries and research prompts to whatever search service and model the host or engine is configured with, and it never changes that configuration.
 
 ## Develop
 
 ```bash
 python3 dev/atomic-decompose/selftest.py          # runnable check, standard library only
 python3 dev/authoring-agent-skills/selftest.py    # runnable check, standard library only
+python3 dev/deep-research-run/selftest.py         # runnable check, standard library only
 python3 skills/authoring-agent-skills/scripts/lint_skill.py skills/<skill> --portable --evals-dir dev/<skill>/evals
 ```
 
-`.github/workflows/check.yml` runs all three on every pull request and on `main`. A lint error fails the run; lint warnings are printed.
+`.github/workflows/check.yml` runs all of them on every pull request and on `main`. A lint error fails the run; lint warnings are printed.
 
 Agent evals for `authoring-agent-skills` are run by hand, not in CI. They need the Cursor CLI (`cursor-agent`), logged in:
 
@@ -81,3 +82,4 @@ Eval fixture skills are stored as `SKILL.fixture.md`, so that installers don't o
 
 - `dev/atomic-decompose/evals/files/fixture-skills/csv-profile/`. The evaluator copies it into the case workspace as `.agents/skills/csv-profile/SKILL.md`, with a `.claude/skills/csv-profile` symlink to it.
 - `dev/authoring-agent-skills/evals/files/fixture-skills/changelog-writer/`. Copy the folder into the case workspace as `.agents/skills/changelog-writer/` and rename the file to `SKILL.md`. Its defects are planted: eval 3 checks that a review finds them.
+- `dev/authoring-agent-skills/evals/files/fixture-skills/notes-keeper/`. Copy it the same way. It sits at its own 20-line cap (`scripts/check_size.py`): eval 6 checks that a change is made without cutting rules or raising the cap.

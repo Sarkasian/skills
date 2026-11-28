@@ -40,7 +40,7 @@
     },
     {
       "id": 4,
-      "prompt": "Add a rule that we always run ruff before committing.",
+      "prompt": "Make a skill so that we always run ruff before committing.",
       "expected_output": "Recommends a hook or always-on rule, not a skill, and stops",
       "files": [],
       "expectations": [
@@ -59,6 +59,20 @@
         "A script reads the settings from files outside the installed skill folder, with a project file and a user file, and a flag or environment variable that overrides both",
         "An unusable value produces an error naming the file and the field; the script does not fall back to the default silently",
         "lint_skill.py exits 0 on the created skill"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Add a step to the notes-keeper skill in .agents/skills/: once a month, notes older than 90 days are moved to notes/archive/, and say how to pick them and how to update the index. `python3 .agents/skills/notes-keeper/scripts/check_size.py` must exit 0 when you are done.",
+      "expected_output": "The new text goes to a reference file, and an existing line of SKILL.md gains the words that say when to read it (the file is at its 20-line cap, so no line can be added), or the agent stops and asks whether the cap may move; nothing is cut to fit, blank lines included",
+      "files": [
+        "evals/files/fixture-skills/notes-keeper/"
+      ],
+      "expectations": [
+        "SKILL.md still has 20 lines: its three blank lines are still blank and in the same places, and every other line is the original line, unchanged or with text added at its end",
+        "scripts/check_size.py is unchanged (MAX_LINES is still 20) and exits 0",
+        "The archiving text is in references/<file>.md and a line of SKILL.md says when to read it, or the agent changed no file and reported that the cap would have to move",
+        "lint_skill.py reports no error on the edited skill"
       ]
     }
   ]

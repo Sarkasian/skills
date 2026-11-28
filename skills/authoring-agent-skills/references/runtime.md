@@ -18,7 +18,7 @@ helpful: 0
 harmful: 0
 supersedes: null
 ---
-**Trigger:** … **Lesson:** … **Evidence:** eval X failed 3/3 without, passed 3/3 with. **Action:** add to references/playbook.md §…; add eval case.
+**Trigger:** … **Lesson:** … **Evidence:** eval X failed 3/3 without, passed 3/3 with. **Action:** add to `references/<topic>.md` §…; add eval case.
 ```
 
 ## Working memory / compaction

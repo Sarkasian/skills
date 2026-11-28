@@ -21,7 +21,7 @@ Host-specific names, limits and paths are left out of this file because they cha
 ## Versioning
 - The skill specification has no version field and hosts do not read `metadata.version`; keep it there for your own tooling. For a plugin, the version in the manifest is the one that counts.
 - Strict SemVer. Major: rename, trigger-scope change, removed script or flag, config schema break. Minor: new optional config or reference, deprecation. Patch: wording fixes that pass evals. Never mutate a release; deprecate in a minor, remove in a major.
-- Hosts detect an update in different ways: some keep users on the old copy until the version string changes, some reject a version that is not SemVer, some follow the commit when no version is set. → Always set strict SemVer, bump it on every release, and set it in one place only.
+- Hosts detect an update in different ways: some keep users on the old copy until the version string changes, some reject a version that is not SemVer, some follow the commit when no version is set. → Always set strict SemVer and bump it on every release. A plain skill holds it in `metadata.version` only. A plugin holds the same string in every manifest and in `metadata.version`; change them together.
 - Pin installs to a tag, a commit SHA or a content hash. Tag every release (`<name>-v<version>`). For stable and latest channels, publish two marketplaces at different refs.
 - Release gate, in this order, using the host's own tooling where it exists: validate the manifest and skill → run the evals on a pinned model against a pass threshold → tag.
 

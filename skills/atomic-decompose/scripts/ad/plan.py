@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import sys
 
 from ad.common import Fail, QUESTION_TYPES, TASK_DIR
@@ -11,7 +12,7 @@ from ad.common import Fail, QUESTION_TYPES, TASK_DIR
 def _list(value):
     if value is None:
         return []
-    return [value] if isinstance(value, str) else list(value)
+    return list(value) if isinstance(value, (list, tuple, dict)) else [value]  # one value stands for a list of one
 
 
 def _norm_path(p):
@@ -23,7 +24,7 @@ def _norm_path(p):
 
 def read_plan_file(path):
     try:
-        text = sys.stdin.read() if path == "-" else open(path, encoding="utf-8").read()
+        text = sys.stdin.read() if path == "-" else open(path, encoding="utf-8", errors="surrogateescape").read()
         plan = json.loads(text)
     except OSError as e:
         raise Fail("plan_unreadable", f"cannot read {path}: {e}", 2)
@@ -38,6 +39,9 @@ def plan_items(plan):
     items = plan.get("items") or []
     if isinstance(items, dict):  # accept {"1": {...}} as well as a list
         items = [dict(v, id=v.get("id", k)) if isinstance(v, dict) else v for k, v in items.items()]
+    if not isinstance(items, list):
+        raise Fail("plan_invalid", f"`items` must be a list of items, not {items!r:.80}", 2, "needs_fix",
+                   "write `items` as a JSON list of objects, then rerun the same command")
     return items
 
 
@@ -88,7 +92,11 @@ def plan_problems(st):
         if not it["files"] and not (it["check"] or it["check_cmd"]):
             probs.append(f"{name}: a read-only item needs `check` (points to judge its result by)")
         for f in it["files"]:
-            if not f or os.path.isabs(f) or f == ".." or f.startswith("../") or "/../" in f \
+            norm = posixpath.normpath(f) if f else ""  # `pkg/..` is the root too, and `pkg/../..` is above it
+            if norm == ".":
+                probs.append(f"{name}: file {f!r} is the whole root; name the files or folders the item changes")
+                continue
+            if not f or os.path.isabs(f) or norm == ".." or norm.startswith("../") or "/../" in f \
                     or f.split("/")[0] in (TASK_DIR, ".git"):
                 probs.append(f"{name}: file {f!r} must be a path inside the root, not under .git/ or {TASK_DIR}/")
         for c in it["covers"]:
@@ -158,6 +166,8 @@ def apply_plan(st, plan, task):
         if q["answer"] is None:
             q.update(type=str(raw.get("type") or "scope"), text=str(raw.get("text") or ""),
                      default=str(raw.get("default") or ""), because=raw.get("because"))
+    # Only the items from before this call: an id the file gives a new item (0, 1, 2 ...) is the file's own name
+    # for it, and must not be read as the generated id of another new item added a moment ago.
     by_id = {it["id"]: it for it in st["items"]}
     alias, touched = {}, []
     open_states = ("pending", "failed", "blocked")
@@ -167,9 +177,16 @@ def apply_plan(st, plan, task):
             continue
         old = by_id.get(new["id"]) if new["id"] else None
         if raw.get("status") == "dropped":
-            if old is not None and old["status"] in open_states:
-                old["status"] = "dropped"
-                out["dropped"].append(old["id"])
+            if old is not None and old["status"] == "dropped":  # the same plan file, applied again
+                continue
+            if old is None or old["status"] not in open_states:
+                raise Fail("plan_invalid", f"item {new['id']} cannot be dropped: " + (
+                    "there is no such item" if old is None else f"it is {old['status']}, and only an item that "
+                    "is pending, failed or blocked can be"), 2, "needs_fix",
+                    "take its `\"status\": \"dropped\"` out of the plan file and rerun; a running item can be "
+                    "dropped after its executor has replied and `next` has run")
+            old["status"] = "dropped"
+            out["dropped"].append(old["id"])
             continue
         if old is None:
             given, new["id"] = new["id"], str(max([int(i["id"]) for i in st["items"]] + [0]) + 1)
@@ -178,9 +195,10 @@ def apply_plan(st, plan, task):
             new.update(status="pending", tries=0, notes=[], commit=None, result=None, block=None, run=None,
                        failure=None, origin="plan")
             st["items"].append(new)
-            by_id[new["id"]] = new
+            touched.append(new)
             out["added"].append(new["id"])
-        elif old["status"] in open_states:
+            continue
+        if old["status"] in open_states:
             fields = {k: new[k] for k in ("title", "goal", "covers", "files", "check_cmd", "check", "needs",
                                           "depends", "skill")}
             # Compare like with like: the item as a plan file gives it. `block --question` adds its question to the
@@ -193,7 +211,16 @@ def apply_plan(st, plan, task):
                 out["edited"].append(old["id"])
         else:
             out["kept"].append(old["id"])
-        touched.append(by_id[new["id"]])
+            # An edit to an item that is running or done changes nothing, so say so instead of dropping it unseen.
+            # A question the item asked with `block` is in its needs in the state, and may not be in the file.
+            asked = {q["id"] for q in st["questions"] if q.get("origin") == "block"}
+            was, now = normalise_item(old), dict(new)
+            was["needs"], now["needs"] = ([n for n in ns if n not in asked] for ns in (was["needs"], now["needs"]))
+            if old["status"] in ("running", "done") and any(
+                    was[k] != now[k] for k in ("title", "goal", "covers", "files", "check_cmd", "check", "needs",
+                                               "depends", "skill")):
+                out.setdefault("ignored_edits", []).append(old["id"])
+        touched.append(old)
     for it in touched:  # `depends` may name the plan file's own ids for new items
         it["depends"] = [alias.get(d, d) for d in it["depends"]]
     probs = plan_problems(st)
@@ -202,6 +229,29 @@ def apply_plan(st, plan, task):
                    "needs_fix", "fix every listed problem in the plan file, then rerun the same command")
     write_plan_file(task, st)
     return out
+
+
+def add_question_to_plan_file(task, st, q, item_id):
+    """Put a question that `block` asked, and the item's need of it, into plan.json, and change nothing else in
+    the file: it may hold edits the coordinator has not applied with `plan` yet. A missing file is written from
+    the state. A file that is not a plan (not JSON, perhaps half written at this moment) or that does not have
+    the item is left as it is; the state has the question either way."""
+    if not os.path.exists(task.plan_path):
+        return write_plan_file(task, st)
+    try:
+        plan = read_plan_file(task.plan_path)
+    except Fail:
+        return
+    raw, known = plan.get("items"), plan.get("questions") or []
+    pairs = raw.items() if isinstance(raw, dict) else [(None, x) for x in raw] if isinstance(raw, list) else []
+    mine = [x for k, x in pairs if isinstance(x, dict) and str(x.get("id", k)) == item_id]
+    if not mine or not isinstance(known, list):
+        return
+    plan["questions"] = known + [{k: q[k] for k in ("id", "type", "text", "default", "because")}]
+    for x in mine:
+        x["needs"] = [n for n in _list(x.get("needs")) if n != q["id"]] + [q["id"]]
+    with open(task.plan_path, "w", encoding="utf-8", errors="surrogateescape") as f:
+        json.dump(plan, f, ensure_ascii=False, indent=1)
 
 
 def write_plan_file(task, st):
@@ -213,5 +263,5 @@ def write_plan_file(task, st):
             "items": [{k: it[k] for k in ("id", "title", "goal", "covers", "files", "check_cmd", "check",
                                           "needs", "depends", "skill")}
                       for it in st["items"] if it["status"] != "dropped"]}
-    with open(task.plan_path, "w", encoding="utf-8") as f:
+    with open(task.plan_path, "w", encoding="utf-8", errors="surrogateescape") as f:
         json.dump(plan, f, ensure_ascii=False, indent=1)

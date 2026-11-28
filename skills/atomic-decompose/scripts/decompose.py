@@ -25,6 +25,10 @@ import json
 import os
 import sys
 
+sys.dont_write_bytecode = True  # no __pycache__ in the installed skill folder
+# python3 -P, -I and PYTHONSAFEPATH leave the script's folder off sys.path, so put it there
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
 from ad.common import Fail, LOG_EVENTS, MAX_PARALLEL, MAX_PARALLEL_LIMIT, Parser, PROJECT_CONFIG, SOURCES
 from ad.state import Task
 from ad.commands import (cmd_annotate, cmd_answer, cmd_block, cmd_decide, cmd_doctor, cmd_done, cmd_finish, cmd_log,
@@ -58,12 +62,14 @@ def build_parser():
     s.add_argument("--review", choices=("auto", "always", "never"), default="auto",
                    help="auto: review the work that executors did, not the coordinator's own")
     s = cmd("plan", "Apply an edited plan file (default: the task's plan.json) to the items not started.")
-    s.add_argument("file", nargs="?")
+    s.add_argument("file", nargs="?", help="the plan JSON file to apply (default: the task's plan.json)")
     s = cmd("answer", "Record an answer; --defaults accepts every open question's default.")
-    s.add_argument("--id")
-    s.add_argument("--text")
-    s.add_argument("--source", choices=SOURCES, default="user")
-    s.add_argument("--defaults", action="store_true")
+    s.add_argument("--id", help="the question id, such as Q1")
+    s.add_argument("--text", help="the answer, in the user's words")
+    s.add_argument("--source", choices=SOURCES, default="user",
+                   help="where the answer comes from (default: user); default_unconfirmed is a default you act "
+                        "on without the user's word, and the summary lists it for the report")
+    s.add_argument("--defaults", action="store_true", help="the user accepted the default of every open question")
     s = cmd("annotate", "Add a note to an open item, or list its notes; the item's next brief carries its notes.")
     s.add_argument("--item", required=True, help="the item id")
     g = s.add_mutually_exclusive_group(required=True)
@@ -72,37 +78,41 @@ def build_parser():
     s.add_argument("--source", choices=("user", "system"), default="user", help="who the note comes from")
     cmd("next", "Land finished runs, run the task checks, and print the next action.")
     s = cmd("done", "Executor: run an item's checks and commit it.")
-    s.add_argument("id")
+    s.add_argument("id", help="the item id, as the brief gives it")
     s.add_argument("--result", help="a read-only item's result file (default: the path its brief names)")
     s.add_argument("--no-change", help="why the item needs no file change")
     s = cmd("block", "Executor: park an item on a question for the user or an approval.")
-    s.add_argument("id")
-    s.add_argument("--question")
+    s.add_argument("id", help="the item id, as the brief gives it")
+    s.add_argument("--question", help="a question only the user can answer")
     s.add_argument("--default", help="the answer you would act on")
     s.add_argument("--approval", help="the step outside the goal")
     s = cmd("decide", "Record a choice, its criteria and each rejected option.")
-    s.add_argument("--question", required=True)
-    s.add_argument("--chosen", required=True)
+    s.add_argument("--question", required=True, help="what had to be chosen")
+    s.add_argument("--chosen", required=True, help="the option taken")
     s.add_argument("--reject", action="append", default=[], help="\"<option>::<why it lost>\", once per option")
     s.add_argument("--criteria", help="question ids holding the criteria")
     s.add_argument("--because", help="workspace evidence, when no question holds the criteria")
-    s.add_argument("--supersedes")
+    s.add_argument("--supersedes", help="the id of an earlier decision this one replaces, such as D1")
     cmd("status", "Print the plan, answers, decisions, progress and the next command.")
     s = cmd("resume", "Restart a stopped task after the user replied.")
     s.add_argument("--approve", help="item ids whose step the user approved")
     s.add_argument("--deny", help="item ids whose step the user refused")
-    s.add_argument("--new-session", action="store_true")
+    s.add_argument("--new-session", action="store_true",
+                   help="record that a new session, without the earlier conversation, took the task up")
     s = cmd("stop", "Stop the task.")
-    s.add_argument("--condition", choices=("user", "fault"), required=True)
-    s.add_argument("--detail", required=True)
+    s.add_argument("--condition", choices=("user", "fault"), required=True,
+                   help="user: the user asked to stop; fault: something outside the task is broken")
+    s.add_argument("--detail", required=True, help="why, in one sentence; resume and status show it")
     cmd("finish", "Check that everything is committed and passes; complete the task and print its summary.")
     s = cmd("mark", "Record the user's mark.")
-    s.add_argument("--mark", choices=("accepted", "reworked", "unmarked"), required=True)
-    s.add_argument("--reason")
+    s.add_argument("--mark", choices=("accepted", "reworked", "unmarked"), required=True,
+                   help="accepted: the user took the result; reworked: the user asked for changes (reopens the "
+                        "task); unmarked: the user said neither")
+    s.add_argument("--reason", help="what the user said; required with reworked")
     s = cmd("log", "Record a run-record event.")
-    s.add_argument("event", choices=LOG_EVENTS)
-    s.add_argument("--ref")
-    s.add_argument("--data", help="JSON object")
+    s.add_argument("event", choices=LOG_EVENTS, help="the event to record; wrong_engagement hands the task back")
+    s.add_argument("--ref", help="the item, question or run id the event is about")
+    s.add_argument("--data", help="a JSON object with the event's details")
     s = cmd("tune", "Change the task's max_parallel for the next round.")
     s.add_argument("--max-parallel", type=int, required=True,
                    help=f"an integer from 1 to {MAX_PARALLEL_LIMIT}")
@@ -130,11 +140,16 @@ def run(argv):
         raise Fail("bad_input", f"no task at {task.dir} (no state.json)", 2)
     if a.command not in ANY_STATUS and task.load()["status"] == "stopped":
         raise Fail("task_stopped", "the task is stopped", 1, "needs_user", stop_action(task, task.load())["next"])
+    if a.command not in ("status", "next", "resume", "log") and task.load()["status"] == "handed_back":
+        raise Fail("handed_back", "the task was handed back, so this method no longer runs on it", 1, "needs_fix",
+                   "carry on as normal work, without this method")
     return COMMANDS[a.command](task, a)
 
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if hasattr(sys.stdout, "reconfigure"):  # a file name that is not UTF-8 is printed as its bytes, not a crash
+        sys.stdout.reconfigure(errors="surrogateescape")  # (stderr already escapes what it cannot encode)
     try:
         out = run(argv)
     except SystemExit as e:

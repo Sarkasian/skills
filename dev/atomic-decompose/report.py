@@ -43,7 +43,8 @@ def read_record(task_dir):
     """DM-5 lines of a task folder, and whether a line does not parse (a torn record)."""
     lines, torn = [], False
     try:
-        raw = (Path(task_dir) / "record.jsonl").read_text(encoding="utf-8").splitlines()
+        # as decompose.py writes it: a file name that is not UTF-8 is in the file as its bytes
+        raw = (Path(task_dir) / "record.jsonl").read_text(encoding="utf-8", errors="surrogateescape").splitlines()
     except OSError:
         return [], True
     for text in raw:
@@ -316,7 +317,7 @@ def cmd_weekly(a):
             if not any(in_week(l) for l in lines if "ts" in l):
                 continue
             try:
-                st = json.loads((d / "state.json").read_text(encoding="utf-8"))
+                st = json.loads((d / "state.json").read_text(encoding="utf-8", errors="surrogateescape"))
             except (OSError, json.JSONDecodeError):
                 st = None
             if torn or st is None:

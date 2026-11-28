@@ -1,7 +1,7 @@
 ---
 name: OLD-NAME
 description: "DEPRECATED (removal YYYY-MM-DD). Use NEW-NAME instead; same inputs."
-user-invocable: false
+# To hide it from the user's menu, add the target host's own key here. Look it up per host; it is not portable.
 metadata:
   replaced-by: NEW-NAME
   deprecated-since: X.Y.0

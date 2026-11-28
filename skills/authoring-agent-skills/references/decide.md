@@ -19,7 +19,7 @@ Host-specific names, limits and paths are left out of this file because they cha
 - The binding constraint is the listing budget: each host gives all skill descriptions together a small share of context and cuts descriptions when it overflows. Front-load trigger words, and look up the budget of each target host.
 - **Split when:** distinct triggers or intents; different side effects (read-only analysis vs apply); different runtime needs (`compatibility`); activation is imprecise because scope is too broad.
 - **Don't split when:** variants are mutually exclusive (AWS/GCP/Azure → one workflow + `references/<p>.md`); the parts always load together (risk of conflicting instructions); overlap can be fixed by tightening both descriptions first.
-- References: one level deep (nested files get partially read); add a table of contents if >100 lines; state *when* to load each ("read X if API returns non-200").
+- References: one level deep, which means SKILL.md names each one and states *when* to load it ("read X if API returns non-200"). A file reached only through another reference gets partially read or missed. Add a table of contents if >100 lines.
 - Router skill: chooses only, then points to refs, sibling skills, or subagents.
 - Shared content: duplicate it or use a plugin-level script; avoid cross-skill relative paths (paths resolve from the skill root).
 - Use unique names; never rely on shadowing. Which copy wins when two skills share a name differs by host.
@@ -39,4 +39,4 @@ Host-specific names, limits and paths are left out of this file because they cha
 - Every host has its own switch for "the model may not start this skill by itself", and the switches differ in name, location (frontmatter, a side file, settings) and exact meaning. One example is the frontmatter key `disable-model-invocation: true`. Look up the switch for each target host; do not carry one host's key to another.
 - Check three things in the host's documentation: does the switch also remove the description from context; can the user still invoke the skill; does it apply to skills shipped in a plugin.
 - A field that pre-approves tools usually does not restrict the tools available. Restricting needs a deny rule or a deny field. Never pre-approve a general shell.
-- Scripts that change things need `--confirm` + `--dry-run`. A destructive step outside the approved plan → stop and ask.
+- Scripts that change things need `--dry-run` (the script contract in `references/authoring.md`, which SKILL.md loads at step 5). A destructive step outside the approved plan → stop and ask.

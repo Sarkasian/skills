@@ -1,8 +1,7 @@
 ## Evaluation
-- Evals before docs: find gaps → ~3 scenarios → measure the no-skill baseline → write minimal instructions.
-- Start with 10–50 cases from real failures.
+- Evals before docs: find gaps → at least 3 cases from real failures → measure the no-skill baseline → write minimal instructions. Grow the set towards 10–50 cases as real failures arrive.
 - **Trigger evals:** ~20 queries, 8–10 should trigger and 8–10 near-miss negatives. Run each 3×; a query passes at trigger rate >0.5. Split 60/40 train/test; ~5 iterations; pick the best by *test* score. Don't paste failed-query keywords into the description (overfits). Simple one-step prompts make poor trigger tests. Cover explicit, implicit, and contextual invocation plus a negative control.
-- **Task evals:** with-skill vs without-skill (new skill) or vs the old version (improvement), in the same turn. Report pass rate, tokens, time as mean ± sd with delta. Record tokens and duration immediately (unrecoverable later).
+- **Task evals:** with-skill vs without-skill (new skill) or vs the old version (improvement). Start both arms together, each in its own clean run. Report pass rate, tokens, time as mean ± sd with delta. Record tokens and duration immediately (unrecoverable later).
 - Prove the skill ran (transcript or host telemetry), and weight that below task quality.
 - Graders: code where possible; grade the outcome/environment state, not the final message; LLM judge with an "Unknown" option; partial credit for multi-part tasks; calibrate the judge like a classifier (100–200 labels per failure mode; report TPR/TNR; prefer binary); pairwise for subjective quality; blind comparator for v1 vs v2.
 - Error analysis first: open → axial coding, 100+ traces to saturation, one domain-expert "benevolent dictator". Read transcripts; don't trust scores alone.

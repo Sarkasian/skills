@@ -1,6 +1,7 @@
 """Runs: grouping items, briefs, landing worktree commits, the review and the task checks."""
 from __future__ import annotations
 
+import filecmp
 import os
 import shlex
 import shutil
@@ -116,6 +117,8 @@ def start_runs(task, st, groups):
         elif top:  # a file of this run's items that is dirty already holds an earlier executor's partial work
             files = [f for i in g for f in by[i]["files"]]
             run["snapshot"] = {p: h for p, h in dirty_files(top, st["root"]).items() if not covered(p, files)}
+        if top:  # what is already changed in the repository outside the root; a new worktree has nothing changed
+            run["snapshot_out"] = {} if run["worktree"] else dirty_files(top, st["root"], outside=True)
         for i in g:
             by[i].update(status="running", run=rid)
             task.event("item_started", i, {"run": rid, "try": by[i]["tries"] + 1})
@@ -168,9 +171,32 @@ def write_brief(task, st, run):
     path = os.path.join(task.dir, "briefs", f"{run['id']}.md")
     for d in ("briefs", "results"):
         os.makedirs(os.path.join(task.dir, d), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
         f.write("\n".join(lines) + "\n")
     return path
+
+
+def outside_root(run, top_of_run):
+    """{path: hash} of what changed since the run began in its repository but outside the root. No item can own
+    such a file. The paths are relative to the run's folder, so each starts with `../`. Empty when the root is
+    the top of the repository, and for a run that began before this was recorded."""
+    if "snapshot_out" not in run:
+        return {}
+    links = {os.path.relpath(os.path.join(top_of_run, p), run["dir"]).replace("\\", "/")
+             for p in run.get("links") or []}
+    return {p: h for p, h in dirty_files(top_of_run, run["dir"], outside=True).items()
+            if run["snapshot_out"].get(p) != h and p not in links}
+
+
+def left_behind(st):
+    """The worktrees and branches a task that stops for good leaves in the repository, for the user to remove."""
+    out = []
+    for r in st["runs"]:
+        there = bool(r.get("worktree")) and os.path.isdir(r["worktree"])
+        if r.get("branch") and (there or r.get("branch_kept")):
+            out.append({"run": r["id"], "items": r["items"], "worktree": r["worktree"] if there else None,
+                        "branch": r["branch"]})
+    return out
 
 
 def result_path(task, it):
@@ -219,10 +245,28 @@ def shelve(task, run, paths, name):
     patch = os.path.join(task.dir, "patches", name)
     try:
         save_patch(run["dir"], paths, patch)
-    except (Fail, OSError) as e:
+    except (Fail, OSError, ValueError) as e:  # ValueError: git printed a file name that is not UTF-8
         return f"could not be saved ({e}), so its files are left as they were"
     restore_paths(run["dir"], paths)
     return f"is saved at {patch} (`git apply` it to reuse it)"
+
+
+def restored(kept):
+    """Whether `shelve` put the files back, given what it returned."""
+    return bool(kept) and kept.startswith("is saved")
+
+
+def _copy_new(src, dest):
+    """Copy a new file out of a worktree. git lists a git repository made inside one as a folder, not as files."""
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    if os.path.isdir(src) and not os.path.islink(src):
+        shutil.copytree(src, dest, symlinks=True)
+    else:
+        shutil.copy2(src, dest, follow_symlinks=False)
+
+
+def _same_file(a, b):
+    return all(os.path.isfile(x) and not os.path.islink(x) for x in (a, b)) and filecmp.cmp(a, b, shallow=False)
 
 
 def land_run(task, st, run):
@@ -233,7 +277,8 @@ def land_run(task, st, run):
     if picks:
         p = git(top, "cherry-pick", *picks, check=False)
         if p.returncode != 0:
-            clash = git(top, "diff", "--name-only", "--diff-filter=U", check=False).stdout.split()
+            clash = [p for p in git(top, "diff", "--name-only", "-z", "--diff-filter=U", check=False)
+                     .stdout.split("\0") if p]
             git(top, "cherry-pick", "--abort", check=False)
             if not clash:  # git refused before picking: staged or uncommitted changes in the way
                 return {"condition": "land_blocked",
@@ -258,13 +303,43 @@ def land_run(task, st, run):
             kept = shelve(task, run, [p for p in left if covered(p, it["files"])], f"{i}-{run['id']}.patch")
             if kept:
                 it["notes"].append(f"Its partial work from run {run['id']} {kept}")
-    for p, h in dirty_files(git_top(run["dir"]), run["dir"]).items():  # new files outside every item's files:
-        dest = os.path.join(st["root"], p)                               # finish lists them in untracked_left
-        if untracked(h) and not os.path.lexists(dest):
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            shutil.copy2(os.path.join(run["dir"], p), dest, follow_symlinks=False)
+    left = dirty_files(git_top(run["dir"]), run["dir"])
+    left.update(outside_root(run, git_top(run["dir"])))  # and what changed in the worktree outside the root
+    links = {os.path.relpath(os.path.join(run["worktree"], p), run["dir"]).replace("\\", "/")
+             for p in run.get("links") or []}
+    for p, h in left.items():                       # new files outside every item's files:
+        if not untracked(h) or p in links:          # finish lists them in untracked_left
+            continue
+        src, dest = os.path.join(run["dir"], p), os.path.normpath(os.path.join(st["root"], p))
+        try:
+            if not os.path.lexists(dest):
+                _copy_new(src, dest)
+                continue
+            if _same_file(src, dest):
+                continue
+            why = "the main folder already has another file of that name"
+        except OSError as e:  # a copy that fails must not stop the landing
+            why = f"it could not be copied to the main folder: {e}"
+        # not dropped with the worktree: kept in the task folder, under its path from the top of the repository
+        kept = os.path.join(task.dir, "patches", f"{run['id']}-new",
+                            os.path.relpath(src, run["worktree"]))
+        try:
+            _copy_new(src, kept)
+        except OSError:
+            kept = None
+        run.setdefault("kept_files", []).append({"file": p, "why": why, "kept": kept})
+    outside = [p for p, h in left.items() if not untracked(h)]  # tracked edits no item owns go with the worktree
+    if outside:
+        patch = os.path.join(task.dir, "patches", f"{run['id']}-outside.patch")
+        with _quiet(Fail, OSError, ValueError):  # a patch that cannot be saved must not stop the landing
+            save_patch(run["dir"], outside, patch)
+            run["outside"] = patch
+    # lint: no-dry-run: the run's own worktree; its commits are landed or stay on its branch, the rest is saved above
     git(top, "worktree", "remove", "--force", run["worktree"], check=False)
-    if not clash:
+    if clash:
+        run["branch_kept"] = True
+    else:
+        # lint: no-dry-run: the run's own branch, after every commit on it was cherry-picked onto HEAD
         git(top, "branch", "-D", run["branch"], check=False)
     return None
 
@@ -326,9 +401,11 @@ def start_review(task, st):
               "conflicts between items, and anything a goal asked for that is not there.",
               f"Write one line per finding to {path}: `<high|medium|low> <file>:<line> <problem> -> <fix>`, "
               "or `no findings`. Reply with the number of findings."]
+    if os.path.isfile(path):  # the review from before a rework: kept, and out of the way of the new one
+        os.replace(path, os.path.join(task.dir, f"review-before-{rid}.md"))
     brief = os.path.join(task.dir, "briefs", f"{rid}-review.md")
     os.makedirs(os.path.dirname(brief), exist_ok=True)
-    with open(brief, "w", encoding="utf-8") as f:
+    with open(brief, "w", encoding="utf-8", errors="surrogateescape") as f:
         f.write("\n".join(lines) + "\n")
     st["runs"].append({"id": rid, "items": [], "status": "active", "kind": "review", "brief": brief,
                        "worktree": None, "started_at": _now()})

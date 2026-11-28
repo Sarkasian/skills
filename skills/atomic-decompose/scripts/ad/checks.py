@@ -6,7 +6,7 @@ import re
 import signal
 import subprocess
 
-from ad.common import TAIL_LINES
+from ad.common import TAIL_CHARS, TAIL_LINES
 
 
 def run_check(command, cwd, log_path, timeout):
@@ -54,9 +54,12 @@ def run_checks(task, commands, cwd, stem, timeout):
     return out
 
 
-def tail(path, n=TAIL_LINES):
+def tail(path, n=TAIL_LINES, chars=TAIL_CHARS):
+    """The last `n` lines of a log, and of those at most the last `chars` characters: one line can be megabytes."""
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            return "".join(f.readlines()[-n:]).rstrip()
+        with open(path, "rb") as f:
+            f.seek(max(0, os.path.getsize(path) - 16 * chars))  # more than `chars` characters in any encoding
+            text = "".join(f.read().decode("utf-8", "replace").splitlines(keepends=True)[-n:]).rstrip()
     except OSError:
         return ""
+    return text if len(text) <= chars else f"[cut to the last {chars} characters; the whole log is {path}]\n" + text[-chars:]

@@ -3,11 +3,11 @@ name: atomic-decompose
 description: "Plans a big task as small work items, asks every scope or user-only question once with a default, then runs the items (in parallel where they touch different files) from saved state that survives compaction. Use when a task is ambiguous, has several parts, or needs research, planning or delegation, or to resume a task saved under .atomic-decompose/. Not for one edit, fact or command."
 license: MIT
 metadata:
-  version: 0.3.0
+  version: 0.4.0
 ---
 # Atomic Decompose
 
-You plan and ask; the script runs the work. `ad` is `python3 <dir>/scripts/decompose.py` (`<dir>` holds this file), and `<T>` is the task folder `start` prints. Every command prints JSON with a `next` field: do what it says. On `ERROR [code]`, do its `next:` line; if that is not enough, read that code's section in `references/recovery.md`. `ad --help` lists every command.
+You plan and ask; the script runs the work. `ad` is `python3 <dir>/scripts/decompose.py` (`<dir>` holds this file and `scripts/decompose.py`), and `<T>` is the task folder `start` prints. Every command prints JSON with a `next` field: do what it says. On `ERROR [code]`, do its `next:` line; if that is not enough, read that code's section in `references/recovery.md`. `ad --help` lists every command.
 
 ## Continuing a task
 
@@ -34,7 +34,7 @@ Read only what the plan needs. Then write a plan file, in a temp folder outside 
 - **One item, one deliverable.** Its `goal` is all the executor gets, so look the facts up and write them in: names, places in the file, the exact behaviour, the edge cases.
 - **`files`**: every file the item may change (`dir/` covers a folder). Items that share a file run in order in one executor; items that share none run at the same time. So give separable parts separate files, but do not force a split: the script decides what runs at once, even when the user asks for parallel work. `depends: ["<id>"]` makes an item wait for another's result (its `id`, or its position from 1).
 - **`check_cmd`**, on every item with `files`: the repository's own test command as one string, narrowed to the item where possible. The item's tests must include a negative case that fails if the work is wrong. The top-level `check_cmd` checks the whole task.
-- **A read-only item** (research, a comparison) has no `files`. Give it `check`: the points you will judge its result by.
+- **A read-only item** (research, a comparison) has no `files`. Give it `check`: the points you will judge its result by. Read-only items run at the same time, so chain research items that share one local research engine with `depends`. If an item may run a long research pass, allow it in its `goal` with a time limit.
 - **`questions`**: only what the workspace cannot answer, each with the `default` you would act on. `scope` is audience, depth and criteria; `user_only` is names, budgets, owners and dates; `confirm` is a fact you found that the user should know, with the evidence as `because`. Put each question's id in the `needs` of the items it changes.
 - **`skill`**: the name of an installed skill that fits the item, if one does.
 
